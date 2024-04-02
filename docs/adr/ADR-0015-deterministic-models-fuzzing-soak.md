@@ -1,5 +1,7 @@
 # ADR-0015: Host Deterministic Models, Fault Injection, and Soak Workloads
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

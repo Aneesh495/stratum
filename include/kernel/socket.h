@@ -5,6 +5,7 @@
 #include <kernel/tcp.h>
 #include <kernel/udp.h>
 #include <kernel/file.h>
+#include <shared/syscall_nums.h>
 
 #define AF_INET         2
 
@@ -35,30 +36,12 @@ struct sockaddr_in {
     uint8_t        sin_zero[8];
 };
 
-typedef enum socket_state {
-    SOCKET_STATE_UNBOUND = 0,
-    SOCKET_STATE_BOUND,
-    SOCKET_STATE_LISTENING,
-    SOCKET_STATE_CONNECTING,
-    SOCKET_STATE_CONNECTED,
-    SOCKET_STATE_DISCONNECTED,
-    SOCKET_STATE_CLOSED
-} socket_state_t;
-
 typedef struct socket {
-    int             domain;
-    int             type;
-    int             protocol;
-    socket_state_t  state;
-    bool            nonblocking;
-
+    int type;
     union {
         tcp_pcb_t *tcp;
         udp_pcb_t *udp;
     } pcb;
-
-    file_t         *file;
-    spinlock_t      lock;
 } socket_t;
 
 void socket_init(void);
@@ -70,12 +53,8 @@ int sys_accept(int fd, struct sockaddr *addr, uint32_t *addrlen);
 int sys_connect(int fd, const struct sockaddr *addr, uint32_t addrlen);
 int64_t sys_send(int fd, const void *buf, size_t len, int flags);
 int64_t sys_recv(int fd, void *buf, size_t len, int flags);
-int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
-                   const struct sockaddr *dest_addr, uint32_t addrlen);
-int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
-                     struct sockaddr *src_addr, uint32_t *addrlen);
 int sys_shutdown(int fd, int how);
-
-file_t *socket_create_file(socket_t *sock);
+int socket_fd_type(int fd);
+int socket_close_fd(int fd);
 
 #endif /* STRATUM_KERNEL_SOCKET_H */

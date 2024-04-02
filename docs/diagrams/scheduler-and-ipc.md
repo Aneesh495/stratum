@@ -1,5 +1,7 @@
 # Stratum Preemptive SMP Scheduler and IPC
 
+Design overview. See [verification status](../BUILD_STATUS.md) for exercised paths and open work.
+
 ```mermaid
 flowchart TD
     subgraph SchedCore["Preemptive SMP Multi-Queue Scheduler"]

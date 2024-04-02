@@ -10,6 +10,7 @@ static spinlock_t        g_vfs_lock;
 
 static int64_t vfs_file_read(file_t *file, void *buf, size_t count) {
     if (!file || !file->priv || !buf) return -STRATUM_EINVAL;
+    if ((file->flags & 3U) == O_WRONLY) return -STRATUM_EBADF;
     vfs_node_t *node = (vfs_node_t *)file->priv;
     if (!node->ops || !node->ops->read) return -STRATUM_ENOSYS;
 
@@ -25,14 +26,17 @@ static int64_t vfs_file_read(file_t *file, void *buf, size_t count) {
 
 static int64_t vfs_file_write(file_t *file, const void *buf, size_t count) {
     if (!file || !file->priv || !buf) return -STRATUM_EINVAL;
+    if ((file->flags & 3U) == O_RDONLY) return -STRATUM_EBADF;
+    if (count == 0) return 0;
     vfs_node_t *node = (vfs_node_t *)file->priv;
     if (!node->ops || !node->ops->write) return -STRATUM_ENOSYS;
 
     uint64_t flags;
     spin_lock_irqsave(&file->lock, &flags);
-    int64_t bytes = node->ops->write(node, file->offset, buf, count);
+    bool append = (file->flags & O_APPEND) != 0;
+    int64_t bytes = node->ops->write(node, append ? VFS_APPEND_OFFSET : file->offset, buf, count);
     if (bytes > 0) {
-        file->offset += (uint64_t)bytes;
+        file->offset = append ? node->size : file->offset + (uint64_t)bytes;
     }
     spin_unlock_irqrestore(&file->lock, flags);
     return bytes;
@@ -187,7 +191,7 @@ int vfs_unmount(const char *mountpoint) {
 }
 
 vfs_mount_t *vfs_find_mount(const char *path, const char **out_subpath) {
-    if (!path) return NULL;
+    if (!path || path[0] != '/') return NULL;
 
     vfs_mount_t *best_mnt = NULL;
     size_t best_len = 0;
@@ -225,10 +229,8 @@ static int split_component(const char **path_ptr, char *out_name) {
 
     size_t len = 0;
     while (*p != '/' && *p != '\0') {
-        if (len < VFS_MAX_NAME - 1) {
-            out_name[len++] = *p;
-        }
-        p++;
+        if (len == VFS_MAX_NAME - 1) return -STRATUM_ENAMETOOLONG;
+        out_name[len++] = *p++;
     }
     out_name[len] = '\0';
     *path_ptr = p;
@@ -246,9 +248,8 @@ int vfs_resolve_path(const char *path, vfs_node_t **out_node) {
     vfs_node_ref(curr);
 
     char comp[VFS_MAX_NAME];
-    while (split_component(&subpath, comp)) {
-        if (strcmp(comp, ".") == 0) continue;
-        if (strcmp(comp, "..") == 0) continue;
+    int component;
+    while ((component = split_component(&subpath, comp)) > 0) {
 
         if (!curr->ops || !curr->ops->lookup) {
             vfs_node_release(curr);
@@ -259,11 +260,15 @@ int vfs_resolve_path(const char *path, vfs_node_t **out_node) {
         int res = curr->ops->lookup(curr, comp, &next);
         vfs_node_release(curr);
         if (res != 0 || !next) {
-            return -STRATUM_ENOENT;
+            return res ? res : -STRATUM_EIO;
         }
         curr = next;
     }
 
+    if (component < 0) {
+        vfs_node_release(curr);
+        return component;
+    }
     *out_node = curr;
     return 0;
 }
@@ -279,19 +284,16 @@ static int vfs_resolve_parent(const char *path, vfs_node_t **out_parent, char *o
     vfs_node_ref(curr);
 
     char comp[VFS_MAX_NAME];
-    char last_comp[VFS_MAX_NAME];
-    last_comp[0] = '\0';
-
-    while (1) {
-        if (!split_component(&subpath, comp)) {
-            break;
-        }
-
+    int component;
+    while ((component = split_component(&subpath, comp)) > 0) {
         const char *lookahead = subpath;
-        char next_comp[VFS_MAX_NAME];
-        if (!split_component(&lookahead, next_comp)) {
-            /* comp is the leaf element */
-            strncpy(out_name, comp, VFS_MAX_NAME - 1);
+        while (*lookahead == '/') lookahead++;
+        if (*lookahead == '\0') {
+            if (strcmp(comp, ".") == 0 || strcmp(comp, "..") == 0) {
+                vfs_node_release(curr);
+                return -STRATUM_EINVAL;
+            }
+            strcpy(out_name, comp);
             *out_parent = curr;
             return 0;
         }
@@ -306,23 +308,24 @@ static int vfs_resolve_parent(const char *path, vfs_node_t **out_parent, char *o
         int res = curr->ops->lookup(curr, comp, &next);
         vfs_node_release(curr);
         if (res != 0 || !next) {
-            return -STRATUM_ENOENT;
+            return res ? res : -STRATUM_EIO;
         }
         curr = next;
     }
 
     vfs_node_release(curr);
-    return -STRATUM_EINVAL;
+    return component < 0 ? component : -STRATUM_EINVAL;
 }
 
 int vfs_open(const char *path, int flags, int mode, file_t **out_file) {
-    if (!path || !out_file) return -STRATUM_EINVAL;
+    if (!path || !out_file || (flags & 3) == 3 ||
+        ((flags & O_TRUNC) && (flags & 3) == O_RDONLY)) return -STRATUM_EINVAL;
 
     vfs_node_t *node = NULL;
     int res = vfs_resolve_path(path, &node);
 
     if (res != 0) {
-        if ((flags & O_CREAT) != 0) {
+        if (res == -STRATUM_ENOENT && (flags & O_CREAT)) {
             vfs_node_t *parent = NULL;
             char name[VFS_MAX_NAME];
             res = vfs_resolve_parent(path, &parent, name);
@@ -335,10 +338,16 @@ int vfs_open(const char *path, int flags, int mode, file_t **out_file) {
 
             res = parent->ops->create(parent, name, (uint32_t)mode, &node);
             vfs_node_release(parent);
+            if (res == -STRATUM_EEXIST && !(flags & O_EXCL)) {
+                res = vfs_resolve_path(path, &node);
+            }
             if (res != 0) return res;
         } else {
             return res;
         }
+    } else if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) {
+        vfs_node_release(node);
+        return -STRATUM_EEXIST;
     }
 
     if (node->ops && node->ops->open) {
@@ -351,6 +360,7 @@ int vfs_open(const char *path, int flags, int mode, file_t **out_file) {
 
     file_t *f = file_alloc(FILE_TYPE_VFS, &g_vfs_file_ops, node);
     if (!f) {
+        if (node->ops && node->ops->close) node->ops->close(node);
         vfs_node_release(node);
         return -STRATUM_ENOMEM;
     }
@@ -382,25 +392,32 @@ int64_t vfs_lseek(file_t *file, int64_t offset, int whence) {
     uint64_t flags;
     spin_lock_irqsave(&file->lock, &flags);
 
-    int64_t new_off = 0;
+    int64_t base = 0;
+    int res = 0;
     switch (whence) {
     case SEEK_SET:
-        new_off = offset;
         break;
     case SEEK_CUR:
-        new_off = (int64_t)file->offset + offset;
+        base = (int64_t)file->offset;
         break;
-    case SEEK_END:
-        new_off = (int64_t)node->size + offset;
+    case SEEK_END: {
+        vfs_stat_t st;
+        res = node->ops && node->ops->stat ? node->ops->stat(node, &st) : -STRATUM_ENOSYS;
+        if (res == 0) base = (int64_t)st.st_size;
         break;
+    }
     default:
-        spin_unlock_irqrestore(&file->lock, flags);
-        return -STRATUM_EINVAL;
+        res = -STRATUM_EINVAL;
+        break;
     }
 
-    if (new_off < 0) {
+    int64_t new_off;
+    if (res == 0 && (__builtin_add_overflow(base, offset, &new_off) || new_off < 0)) {
+        res = -STRATUM_EINVAL;
+    }
+    if (res != 0) {
         spin_unlock_irqrestore(&file->lock, flags);
-        return -STRATUM_EINVAL;
+        return res;
     }
 
     file->offset = (uint64_t)new_off;
@@ -485,12 +502,11 @@ int vfs_sync(void) {
     uint64_t flags;
     spin_lock_irqsave(&g_vfs_lock, &flags);
 
-    for (vfs_mount_t *m = g_mounts; m != NULL; m = m->next) {
-        if (m->ops && m->ops->sync) {
-            m->ops->sync(m);
-        }
+    int res = 0;
+    for (vfs_mount_t *m = g_mounts; m != NULL && res == 0; m = m->next) {
+        if (m->ops && m->ops->sync) res = m->ops->sync(m);
     }
 
     spin_unlock_irqrestore(&g_vfs_lock, flags);
-    return 0;
+    return res;
 }

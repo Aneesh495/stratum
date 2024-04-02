@@ -51,8 +51,7 @@ static int64_t pipe_read_op(file_t *file, void *buf, size_t count) {
         }
 
         /* Block on read wait queue */
-        spin_unlock_irqrestore(&pipe->lock, flags);
-        wait_queue_wait(&pipe->read_wait);
+        wait_queue_wait_locked(&pipe->read_wait, &pipe->lock, flags);
     }
 
     return (int64_t)bytes_read;
@@ -73,7 +72,7 @@ static int64_t pipe_write_op(file_t *file, const void *buf, size_t count) {
         /* If no readers remain, signal broken pipe */
         if (pipe->readers == 0) {
             spin_unlock_irqrestore(&pipe->lock, flags);
-            return -STRATUM_EPIPE;
+            return bytes_written ? (int64_t)bytes_written : -STRATUM_EPIPE;
         }
 
         size_t space = PIPE_CAPACITY - pipe->count;
@@ -100,8 +99,7 @@ static int64_t pipe_write_op(file_t *file, const void *buf, size_t count) {
         }
 
         /* Block on write wait queue */
-        spin_unlock_irqrestore(&pipe->lock, flags);
-        wait_queue_wait(&pipe->write_wait);
+        wait_queue_wait_locked(&pipe->write_wait, &pipe->lock, flags);
     }
 
     return (int64_t)bytes_written;
@@ -257,6 +255,7 @@ int pipe_create(file_t **read_file, file_t **write_file) {
 
     file_t *wf = file_alloc(FILE_TYPE_PIPE, &g_pipe_write_ops, pipe);
     if (!wf) {
+        pipe->writers = 0;
         file_close(rf);
         return -STRATUM_ENOMEM;
     }

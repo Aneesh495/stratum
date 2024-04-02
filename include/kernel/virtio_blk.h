@@ -45,6 +45,7 @@ typedef struct virtio_blk_dev {
     uint64_t           capacity_sectors;
     uint32_t           block_size;
     bool               read_only;
+    bool               failed;
     spinlock_t         lock;
 } virtio_blk_dev_t;
 

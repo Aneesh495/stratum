@@ -1,4 +1,5 @@
 #include <kernel/net.h>
+#include <kernel/boot.h>
 #include <kernel/ethernet.h>
 #include <kernel/arp.h>
 #include <kernel/ipv4.h>
@@ -130,8 +131,9 @@ void net_poll(void) {
     virtio_net_dev_t *dev = (virtio_net_dev_t *)g_default_netif.driver_priv;
     if (!dev) return;
 
+    tcp_tick();
     static uint8_t rx_raw[2048];
-    while (1) {
+    for (unsigned budget = 0; budget < 32; budget++) {
         int bytes = virtio_net_receive(dev, rx_raw, sizeof(rx_raw));
         if (bytes <= 0) break;
         if ((size_t)bytes < ETH_HLEN) continue;
@@ -145,6 +147,30 @@ void net_poll(void) {
 
         ethernet_input(p);
     }
+}
+
+static uint32_t boot_ip(void) {
+    const char *arg = g_boot_handoff.cmdline;
+    while (*arg) {
+        while (*arg == ' ' || *arg == '\n' || *arg == '\r') arg++;
+        if (strncmp(arg, "ip=", 3) == 0) {
+            const char *p = arg + 3;
+            uint32_t address = 0;
+            for (unsigned i = 0; i < 4; i++) {
+                unsigned octet = 0;
+                unsigned digits = 0;
+                while (*p >= '0' && *p <= '9' && digits < 3) {
+                    octet = octet * 10 + (unsigned)(*p++ - '0');
+                    digits++;
+                }
+                if (!digits || octet > 255 || (i < 3 && *p++ != '.')) break;
+                address = (address << 8) | octet;
+                if (i == 3 && (!*p || *p == ' ' || *p == '\n' || *p == '\r')) return address;
+            }
+        }
+        while (*arg && *arg != ' ' && *arg != '\n' && *arg != '\r') arg++;
+    }
+    return IP4_ADDR(10, 0, 2, 15);
 }
 
 void net_init(void) {
@@ -164,7 +190,7 @@ void net_init(void) {
     }
 
     /* QEMU User Networking defaults: Guest is 10.0.2.15, Gateway is 10.0.2.2 */
-    g_default_netif.ip_addr = IP4_ADDR(10, 0, 2, 15);
+    g_default_netif.ip_addr = boot_ip();
     g_default_netif.netmask = IP4_ADDR(255, 255, 255, 0);
     g_default_netif.gateway = IP4_ADDR(10, 0, 2, 2);
 
@@ -176,8 +202,10 @@ void net_init(void) {
     socket_init();
 
     g_net_initialized = true;
-    kprintf("[NET] Network subsystem initialized: iface=%s ip=10.0.2.15 mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+    kprintf("[NET] Network subsystem initialized: iface=%s ip=%u.%u.%u.%u mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
             g_default_netif.name,
+            g_default_netif.ip_addr >> 24, (g_default_netif.ip_addr >> 16) & 255U,
+            (g_default_netif.ip_addr >> 8) & 255U, g_default_netif.ip_addr & 255U,
             g_default_netif.mac[0], g_default_netif.mac[1], g_default_netif.mac[2],
             g_default_netif.mac[3], g_default_netif.mac[4], g_default_netif.mac[5]);
 }

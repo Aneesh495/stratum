@@ -192,13 +192,12 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     uint8_t info_buf[256];
     uint64_t info_size = sizeof(info_buf);
     st = kernel_file->GetInfo(kernel_file, &EFI_FILE_INFO_ID, &info_size, info_buf);
-    uint64_t kernel_file_size = 0;
-    if (st == EFI_SUCCESS) {
-        EFI_FILE_INFO *finfo = (EFI_FILE_INFO *)info_buf;
-        kernel_file_size = finfo->FileSize;
-    } else {
-        kernel_file_size = 100 * 1024 * 1024; /* Fallback safe upper bound */
+    if (st != EFI_SUCCESS) {
+        efi_print(con, "ERROR: Failed to determine kernel image length.\n");
+        kernel_file->Close(kernel_file);
+        return st;
     }
+    uint64_t kernel_file_size = ((EFI_FILE_INFO *)info_buf)->FileSize;
 
     int val_err = elf_validate_header(&ehdr, kernel_file_size);
     if (val_err != 0) {
@@ -207,7 +206,7 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     }
 
     elf_loaded_image_t loaded_kernel;
-    st = elf_load_segments(bs, kernel_file, &ehdr, &loaded_kernel);
+    st = elf_load_segments(bs, kernel_file, &ehdr, kernel_file_size, &loaded_kernel);
     if (st != EFI_SUCCESS) {
         efi_print(con, "ERROR: Failed to load kernel ELF segments.\n");
         return st;

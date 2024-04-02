@@ -29,13 +29,14 @@ int user_elf_load(const void *elf_data, size_t elf_size, user_program_t *out_pro
         return -3;
     }
 
-    if (ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) {
+    if (ehdr->e_type != ET_EXEC) {
         kprintf("[USER_ELF] ERROR: Not an executable ELF image!\n");
         return -4;
     }
 
-    uint64_t ph_table_end = ehdr->e_phoff + (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr);
-    if (ph_table_end > elf_size) {
+    uint64_t ph_table_size = (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr);
+    if (ehdr->e_phnum == 0 || ehdr->e_phentsize != sizeof(Elf64_Phdr) ||
+        ehdr->e_phoff > elf_size || ph_table_size > elf_size - ehdr->e_phoff) {
         kprintf("[USER_ELF] ERROR: Program header table out of bounds!\n");
         return -5;
     }
@@ -49,20 +50,26 @@ int user_elf_load(const void *elf_data, size_t elf_size, user_program_t *out_pro
 
     const Elf64_Phdr *phdrs = (const Elf64_Phdr *)((const uint8_t *)elf_data + ehdr->e_phoff);
 
+    uint64_t stack_base = USER_STACK_TOP - (USER_STACK_PAGES * PAGE_SIZE);
+    uint64_t image_limit = stack_base - PAGE_SIZE;
+    bool entry_is_executable = false;
     /* 2. Load PT_LOAD segments */
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         const Elf64_Phdr *ph = &phdrs[i];
         if (ph->p_type != PT_LOAD) continue;
 
-        if (ph->p_memsz == 0) continue;
+        if (ph->p_memsz == 0 && ph->p_filesz == 0) continue;
 
-        if (ph->p_vaddr + ph->p_memsz > 0x0000800000000000ULL) {
+        if (ph->p_vaddr < PAGE_SIZE || ph->p_vaddr >= image_limit ||
+            ph->p_memsz > image_limit - ph->p_vaddr ||
+            (ph->p_flags & (PF_W | PF_X)) == (PF_W | PF_X)) {
             kprintf("[USER_ELF] ERROR: Segment vaddr 0x%lx exceeds user space!\n", ph->p_vaddr);
             vmm_destroy_address_space(pml4);
             return -7;
         }
 
-        if (ph->p_offset + ph->p_filesz > elf_size) {
+        if (ph->p_filesz > ph->p_memsz || ph->p_offset > elf_size ||
+            ph->p_filesz > elf_size - ph->p_offset) {
             kprintf("[USER_ELF] ERROR: Segment file offset exceeds image size!\n");
             vmm_destroy_address_space(pml4);
             return -8;
@@ -70,6 +77,9 @@ int user_elf_load(const void *elf_data, size_t elf_size, user_program_t *out_pro
 
         uint64_t seg_start = ph->p_vaddr;
         uint64_t seg_end   = ph->p_vaddr + ph->p_memsz;
+        if ((ph->p_flags & PF_X) && ehdr->e_entry >= seg_start && ehdr->e_entry < seg_end) {
+            entry_is_executable = true;
+        }
         uint64_t page_start = seg_start & ~0xFFFULL;
         uint64_t page_end   = (seg_end + 0xFFFULL) & ~0xFFFULL;
 
@@ -87,7 +97,14 @@ int user_elf_load(const void *elf_data, size_t elf_size, user_program_t *out_pro
                     return -9;
                 }
                 memset(phys_to_virt(paddr), 0, PAGE_SIZE);
-                vmm_map_page(pml4, va, paddr, flags);
+                if (vmm_map_page(pml4, va, paddr, flags) != 0) {
+                    pmm_free_page(paddr);
+                    vmm_destroy_address_space(pml4);
+                    return -9;
+                }
+            } else {
+                vmm_destroy_address_space(pml4);
+                return -7;
             }
 
             /* Copy file slice into page */
@@ -110,8 +127,11 @@ int user_elf_load(const void *elf_data, size_t elf_size, user_program_t *out_pro
         }
     }
 
+    if (!entry_is_executable) {
+        vmm_destroy_address_space(pml4);
+        return -7;
+    }
     /* 3. Allocate and map user stack */
-    uint64_t stack_base = USER_STACK_TOP - (USER_STACK_PAGES * PAGE_SIZE);
     for (uint64_t va = stack_base; va < USER_STACK_TOP; va += PAGE_SIZE) {
         uint64_t stack_paddr = pmm_alloc_page();
         if (!stack_paddr) {
@@ -120,7 +140,11 @@ int user_elf_load(const void *elf_data, size_t elf_size, user_program_t *out_pro
             return -10;
         }
         memset(phys_to_virt(stack_paddr), 0, PAGE_SIZE);
-        vmm_map_page(pml4, va, stack_paddr, PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX);
+        if (vmm_map_page(pml4, va, stack_paddr, PTE_USER | PTE_WRITABLE | PTE_NX) != 0) {
+            pmm_free_page(stack_paddr);
+            vmm_destroy_address_space(pml4);
+            return -10;
+        }
     }
 
     out_prog->entry_point    = ehdr->e_entry;

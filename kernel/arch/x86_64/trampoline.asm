@@ -56,6 +56,7 @@ ap_prot32:
     jmp dword 0x18:(0x8000 + (ap_long64 - trampoline_start))
 
 [BITS 64]
+DEFAULT ABS
 ap_long64:
     ; Reset data segment registers in 64-bit mode
     xor ax, ax

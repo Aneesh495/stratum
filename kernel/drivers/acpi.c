@@ -123,7 +123,7 @@ int acpi_init(const boot_handoff_t *handoff) {
         return -3;
     }
 
-    kprintf("[ACPI] RSDP found (OEM: %.6s, Revision: %u)\n", g_rsdp->oem_id, g_rsdp->revision);
+    kprintf("[ACPI] RSDP found (revision %u)\n", (unsigned int)g_rsdp->revision);
 
     if (g_rsdp->revision >= 2 && g_rsdp->xsdt_addr != 0) {
         g_xsdt = (acpi_sdt_header_t *)phys_to_virt(g_rsdp->xsdt_addr);

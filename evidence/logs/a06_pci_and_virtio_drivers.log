@@ -1,7 +1,0 @@
-=== Stratum Phase P09 Verification Test (Gate A06) ===
-Testing PCI & Virtio Hardware I/O (1 vCPUs)... PASSED
-Testing PCI & Virtio Hardware I/O (2 vCPUs)... PASSED
-Testing PCI & Virtio Hardware I/O (4 vCPUs)... PASSED
-Testing PCI & Virtio Hardware I/O (8 vCPUs)... PASSED
-
-[ALL PASSED] Phase P09 Gate A06 verified across 1, 2, 4, 8 vCPUs.

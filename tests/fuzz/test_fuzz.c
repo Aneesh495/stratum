@@ -441,7 +441,7 @@ int main(int argc, char **argv) {
     }
 
     printf("=================================================================\n");
-    printf("  Stratum Differential Fuzzing Suite (Gate A11 Verification)\n");
+    printf("  Stratum Host Parser Model Mutation Suite\n");
     printf("  Executions per target: %u (Total: %u)\n", iterations_per_target, iterations_per_target * 6);
     printf("=================================================================\n\n");
 

@@ -1,5 +1,7 @@
 # ADR-0011: VFS Abstraction Layer and File Descriptor Tables
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

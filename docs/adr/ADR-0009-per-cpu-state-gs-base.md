@@ -1,5 +1,7 @@
 # ADR-0009: Per-CPU State Isolation via GS Base MSR
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

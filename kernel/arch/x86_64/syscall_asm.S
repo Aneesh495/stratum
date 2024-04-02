@@ -143,6 +143,12 @@ __usercopy_start:
 copy_from_user:
     testq %rdx, %rdx
     jz .Lcfu_done
+    movabsq $0x0000800000000000, %rax
+    cmpq %rax, %rsi
+    jae __usercopy_fault
+    subq %rsi, %rax
+    cmpq %rax, %rdx
+    ja __usercopy_fault
     movq %rdx, %rcx
 .Lcfu_loop:
     movb (%rsi), %al
@@ -158,6 +164,12 @@ copy_from_user:
 copy_to_user:
     testq %rdx, %rdx
     jz .Lctu_done
+    movabsq $0x0000800000000000, %rax
+    cmpq %rax, %rdi
+    jae __usercopy_fault
+    subq %rdi, %rax
+    cmpq %rax, %rdx
+    ja __usercopy_fault
     movq %rdx, %rcx
 .Lctu_loop:
     movb (%rsi), %al

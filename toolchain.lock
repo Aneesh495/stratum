@@ -1,6 +1,7 @@
-# Stratum Toolchain and Dependency Lock
+# Stratum reference macOS build environment
 # Target: x86-64 freestanding (kernel) and UEFI application (loader)
 # Host: Darwin arm64 / Apple Silicon (with TCG cross-emulation)
+# The doctor reports actual tool versions and firmware identity on other supported hosts.
 
 [host]
 os = "Darwin"

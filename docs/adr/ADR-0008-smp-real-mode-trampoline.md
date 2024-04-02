@@ -1,5 +1,7 @@
 # ADR-0008: Real-Mode SMP Trampoline at Physical 0x8000
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

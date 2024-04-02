@@ -1,8 +1,0 @@
-Running P06 Preemptive SMP Scheduler Suite (Gate A03)
-====================================================
-Testing SMP Scheduler (1 vCPUs)... [PASS] (1 vCPUs, threads preempted/slept/woken)
-Testing SMP Scheduler (2 vCPUs)... [PASS] (2 vCPUs, threads preempted/slept/woken)
-Testing SMP Scheduler (4 vCPUs)... [PASS] (4 vCPUs, threads preempted/slept/woken)
-Testing SMP Scheduler (8 vCPUs)... [PASS] (8 vCPUs, threads preempted/slept/woken)
-
-All P06 Scheduler Acceptance Tests Passed.

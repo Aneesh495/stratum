@@ -1,5 +1,7 @@
 # ADR-0012: StrataFS On-Disk Structure and Write-Ahead Logging (WAL)
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

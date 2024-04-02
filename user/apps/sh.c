@@ -1,15 +1,12 @@
 #include <user/strat_api.h>
-#include <shared/ledger.h>
 
 extern void u_printf(const char *fmt, ...);
-extern void u_dprintf(int fd, const char *fmt, ...);
+extern int ledgerd_run(void);
+extern int ledger_put(const char *id, const char *value);
+extern int ledger_pull(const char *peer, const char *id);
 extern size_t strlen(const char *s);
-extern char *strcpy(char *dest, const char *src);
 extern char *strncpy(char *dest, const char *src, size_t n);
 extern int strcmp(const char *s1, const char *s2);
-extern int strncmp(const char *s1, const char *s2, size_t n);
-extern void *memset(void *s, int c, size_t n);
-extern void *memcpy(void *dest, const void *src, size_t n);
 
 static void cmd_help(void) {
     u_printf("Stratum Native Interactive Shell (v0.1.0)\n");
@@ -17,15 +14,14 @@ static void cmd_help(void) {
     u_printf("  help                Display available shell commands\n");
     u_printf("  echo [args...]      Display text arguments to stdout\n");
     u_printf("  cat <path>          Print contents of a file\n");
-    u_printf("  ls <path>           List files and directory contents\n");
     u_printf("  mkdir <path>        Create a directory in the filesystem\n");
     u_printf("  rm <path>           Unlink / delete a file\n");
+    u_printf("  write <path> <text> Append text and sync it to disk\n");
     u_printf("  stat <path>         Display file metadata and size\n");
-    u_printf("  netstat             Display network status and interfaces\n");
-    u_printf("  ping <ip>           Ping destination gateway or host\n");
+    u_printf("  ledgerput <id> <value>  Store a local durable record\n");
+    u_printf("  ledgerpull <ip> <id>    Fetch and store a peer record\n");
+    u_printf("  ledgerd             Serve durable records over TCP\n");
     u_printf("  sysinfo             Display kernel memory, CPUs, and uptime\n");
-    u_printf("  bench               Run userland performance microbenchmarks\n");
-    u_printf("  ledger <cmd>        Query or submit transactions to ledger\n");
 }
 
 static void cmd_echo(int argc, char **argv) {
@@ -47,10 +43,10 @@ static void cmd_cat(const char *path) {
     }
     char buf[256];
     int64_t r;
-    while ((r = read(fd, buf, sizeof(buf) - 1)) > 0) {
-        buf[r] = '\0';
-        u_printf("%s", buf);
+    while ((r = read(fd, buf, sizeof(buf))) > 0) {
+        write(1, buf, (size_t)r);
     }
+    if (r < 0) u_printf("cat: read failed (err=%d)\n", (int)r);
     close(fd);
 }
 
@@ -112,51 +108,28 @@ static void cmd_sysinfo(void) {
     u_printf("  Syscalls:     %lu\n", info.total_syscalls);
 }
 
-static void cmd_netstat(void) {
-    u_printf("Active Internet Connections:\n");
-    u_printf("  Proto  Local Address          Foreign Address        State\n");
-    u_printf("  tcp    10.0.2.15:9090         0.0.0.0:*              LISTEN\n");
-    u_printf("  tcp    10.0.2.15:8080         10.0.2.2:50244         ESTABLISHED\n");
-    u_printf("  udp    10.0.2.15:5000         10.0.2.2:53            UNBOUND\n");
-}
-
-static void cmd_ping(const char *host) {
-    u_printf("PING %s: 56 data bytes\n", host ? host : "10.0.2.2");
-    u_printf("64 bytes from %s: icmp_seq=1 ttl=64 time=0.42 ms\n", host ? host : "10.0.2.2");
-    u_printf("64 bytes from %s: icmp_seq=2 ttl=64 time=0.38 ms\n", host ? host : "10.0.2.2");
-    u_printf("--- %s ping statistics ---\n", host ? host : "10.0.2.2");
-    u_printf("2 packets transmitted, 2 packets received, 0.0%% packet loss\n");
-}
-
-static void cmd_ledger(int argc, char **argv) {
-    if (argc < 2 || strcmp(argv[1], "status") == 0) {
-        user_stat_t st;
-        int res = stat(LEDGER_PATH, &st);
-        if (res == 0) {
-            u_printf("Ledger status: ACTIVE\n");
-            u_printf("Storage file: %s (size: %lu bytes)\n", LEDGER_PATH, st.st_size);
-            u_printf("Verified blocks: %lu\n", (st.st_size - sizeof(ledger_file_header_t)) / sizeof(ledger_block_t));
-        } else {
-            u_printf("Ledger status: STANDBY (storage: %s not yet created)\n", LEDGER_PATH);
-        }
-        return;
+static int cmd_write(int argc, char **argv) {
+    if (argc < 3) {
+        u_printf("Usage: write <file> <text>\n");
+        return -1;
     }
-
-    if (strcmp(argv[1], "submit") == 0) {
-        u_printf("Submitting transaction to ledger daemon via port %d...\n", LEDGER_PORT);
-        int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (sock >= 0) {
-            struct sockaddr_in sin;
-            sin.sin_family = AF_INET;
-            sin.sin_port = 0x8223; /* htons(9090) = 0x2382 swapped -> 0x8223 */
-            sin.sin_addr.s_addr = 0x0F02000A; /* 10.0.2.15 */
-            connect(sock, (struct sockaddr *)&sin, sizeof(sin));
-            u_printf("Transaction submitted successfully. Status: COMMITTED.\n");
-            close(sock);
-        } else {
-            u_printf("Transaction committed to local journal queue.\n");
-        }
+    int fd = open(argv[1], O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        u_printf("write: failed to open '%s' (err=%d)\n", argv[1], fd);
+        return fd;
     }
+    char text[128];
+    size_t len = 0;
+    for (int i = 2; i < argc; i++) {
+        if (i > 2) text[len++] = ' ';
+        for (const char *p = argv[i]; *p; p++) text[len++] = *p;
+    }
+    text[len++] = '\n';
+    int64_t written = write(fd, text, len);
+    int result = written == (int64_t)len ? fsync(fd) : -1;
+    close(fd);
+    if (result != 0) u_printf("write: failed to sync '%s' (err=%d)\n", argv[1], result);
+    return result;
 }
 
 int sh_execute_cmd(const char *cmd_line) {
@@ -180,6 +153,11 @@ int sh_execute_cmd(const char *cmd_line) {
         }
     }
 
+    while (*p == ' ') p++;
+    if (*p) {
+        u_printf("sh: too many arguments\n");
+        return -1;
+    }
     if (argc == 0) return 0;
 
     if (strcmp(argv[0], "help") == 0) {
@@ -196,24 +174,18 @@ int sh_execute_cmd(const char *cmd_line) {
         cmd_rm(argc > 1 ? argv[1] : NULL);
     } else if (strcmp(argv[0], "sysinfo") == 0) {
         cmd_sysinfo();
-    } else if (strcmp(argv[0], "bench") == 0) {
-        u_printf("[BENCH] Running userland syscall microbenchmark (1,000 getpid calls)...\n");
-        uint64_t start_ms = uptime();
-        for (int i = 0; i < 1000; i++) {
-            volatile int p = getpid();
-            (void)p;
-        }
-        uint64_t end_ms = uptime();
-        uint64_t diff_ms = end_ms - start_ms;
-        if (diff_ms == 0) diff_ms = 1;
-        u_printf("[BENCH] Completed 1,000 syscalls in %lu ms (%lu calls/sec)\n",
-                 diff_ms, (1000UL * 1000UL) / diff_ms);
-    } else if (strcmp(argv[0], "netstat") == 0) {
-        cmd_netstat();
-    } else if (strcmp(argv[0], "ping") == 0) {
-        cmd_ping(argc > 1 ? argv[1] : NULL);
-    } else if (strcmp(argv[0], "ledger") == 0) {
-        cmd_ledger(argc, argv);
+    } else if ((strcmp(argv[0], "ledgerput") == 0 || strcmp(argv[0], "ledgerpull") == 0) && argc == 3) {
+        int res = strcmp(argv[0], "ledgerput") == 0 ? ledger_put(argv[1], argv[2]) :
+                                                     ledger_pull(argv[1], argv[2]);
+        if (res == 0) u_printf("Ledger record durable.\n");
+        else u_printf("Ledger operation failed (err=%d)\n", res);
+        return res;
+    } else if (strcmp(argv[0], "ledgerd") == 0) {
+        int res = ledgerd_run();
+        if (res < 0) u_printf("ledgerd: failed (err=%d)\n", res);
+        return res;
+    } else if (strcmp(argv[0], "write") == 0) {
+        return cmd_write(argc, argv);
     } else {
         u_printf("sh: command not found: '%s'\n", argv[0]);
         return -1;

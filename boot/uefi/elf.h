@@ -77,6 +77,6 @@ typedef struct {
 
 /* Validation and loading functions */
 int elf_validate_header(const Elf64_Ehdr *ehdr, uint64_t file_size);
-EFI_STATUS elf_load_segments(EFI_BOOT_SERVICES *bs, EFI_FILE_PROTOCOL *file, const Elf64_Ehdr *ehdr, elf_loaded_image_t *out_info);
+EFI_STATUS elf_load_segments(EFI_BOOT_SERVICES *bs, EFI_FILE_PROTOCOL *file, const Elf64_Ehdr *ehdr, uint64_t file_size, elf_loaded_image_t *out_info);
 
 #endif /* STRATUM_BOOT_ELF_H */

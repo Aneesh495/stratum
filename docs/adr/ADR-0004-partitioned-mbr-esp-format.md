@@ -1,5 +1,7 @@
 # ADR-0004: Partitioned MBR ESP Format for UEFI Boot Disks
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

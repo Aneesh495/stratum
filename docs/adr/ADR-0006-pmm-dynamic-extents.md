@@ -1,5 +1,7 @@
 # ADR-0006: Physical Memory Management with Dynamic Extents
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

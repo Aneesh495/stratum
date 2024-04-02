@@ -1,44 +1,39 @@
-# Stratum Network Contract Specification
+# IPv4 and record service contract
 
-Version: 1.0.0
-Status: Frozen
+The normal QEMU guest polls the virtio-net split queues from the bootstrap CPU.
+Its default static address is `10.0.2.15/24`, with gateway `10.0.2.2`. An
+`ip=<address>` line in the EFI partition's `cmdline.txt` sets the guest
+address for isolated Ethernet links.
 
-## 1. Overview
-The Stratum network stack is an original implementation running entirely within the guest kernel, operating on packets exchanged through the modern virtio-net PCI driver.
+The stack implements Ethernet II, ARP, local IPv4 demultiplexing, ICMP echo
+replies, bounded UDP receive queues, and a small TCP stream implementation.
+IPv4 fragments are rejected. TCP uses one outstanding segment per stream,
+a receive window, and bounded retransmission. DHCP, IPv6, SACK, congestion
+control, and comprehensive TCP interoperability remain open.
 
-## 2. Protocol Boundaries and Supported Capabilities
-1. **Link Layer**:
-   - Ethernet II framing (14-byte header: destination MAC, source MAC, EtherType).
-   - Maximum Transmission Unit (MTU): 1500 bytes payload (1514 bytes on wire).
-   - Hardware address resolution via original ARP engine (RFC 826). Cache with 20-minute eviction timeout.
-2. **Network Layer (IPv4)**:
-   - IPv4 header validation (checksum, version 4, minimum IHL=5, total length).
-   - Local address routing and link-local subnet delivery.
-   - Fragmentation Policy: Incoming IPv4 packets with MF=1 (More Fragments) or Fragment Offset > 0 are rejected with explicit drop counters and diagnostic trace. Fragmentation is not supported.
-3. **Control Protocol (ICMP)**:
-   - ICMPv4 Echo Request (Type 8) and Echo Reply (Type 0) handling with checksum validation.
-   - Destination Unreachable (Type 3) generation on closed UDP ports.
-4. **Transport Layer (UDP)**:
-   - UDP datagram boundary preservation.
-   - Socket receive queue limit: maximum 64 datagrams or 256 KiB per socket. When full, incoming datagrams are dropped with explicit queue-full counter increment.
-5. **Transport Layer (TCP)**:
-   - Full 11-state TCP finite state machine (RFC 9293).
-   - Active open (`connect()`) and passive open (`listen()`, `accept()`).
-   - Sequence number validation, cumulative acknowledgments, and payload streaming.
-   - Retransmission timer management with Jacobson/Karels algorithm (RFC 6298): SRTT, RTTVAR, and exponential RTO backoff (minimum 200 ms, maximum 60 seconds).
-   - Congestion control: Slow Start, Congestion Avoidance with Reno-style recovery (RFC 5681).
-   - Flow control: dynamic sliding receive window based on available socket buffer space.
-   - Half-close (`shutdown(SHUT_WR)`), graceful close (`FIN`), and abortive reset (`RST`).
-   - Timers: Retransmission Timer, TIME_WAIT timer (2*MSL = 4 seconds in test profiles), Keepalive Timer.
+Native sockets are nonblocking and use negative Stratum errno values.
+`poll` reports readiness. TCP `connect` can return `EAGAIN` while the
+handshake is pending. `shutdown(SHUT_WR)` can return `EAGAIN` while an
+outstanding segment is awaiting acknowledgment.
 
-## 3. Buffer Management (`net_buf_t`)
-- Fixed-size packet buffers (2048 bytes) allocated from a bounded kernel slab pool.
-- Reference counted for zero-copy handoff between virtio-net descriptor rings and socket queues.
-- Buffer pool size: maximum 1024 buffers (2 MiB total footprint) in standard profile.
-- Hard resource exhaustion returns `-STRATUM_ENOBUFS` and drops packets without deadlock.
+## Record protocol
 
-## 4. Socket API Contract
-- `sys_socket(AF_INET, SOCK_STREAM, 0)`: Allocate TCP socket endpoint.
-- `sys_socket(AF_INET, SOCK_DGRAM, 0)`: Allocate UDP socket endpoint.
-- Non-blocking I/O supported via `O_NONBLOCK` flag; returns `-STRATUM_EAGAIN` when queue is empty or transmit buffer is full.
-- Readiness events reported via `sys_poll`: `POLLIN` (data available to read), `POLLOUT` (send buffer available), `POLLERR`, `POLLHUP`.
+`ledgerd` is a foreground native user program on TCP port 9090. Each
+connection carries one ASCII request and one response, each ending in LF.
+
+| Request | Response |
+| --- | --- |
+| `APPEND id value` | `OK durable` after flush, including an identical retry |
+| `GET id` | `OK value` or `ERR missing` |
+| Conflicting append | `ERR conflict` |
+| Invalid input or storage failure | `ERR syntax` or `ERR storage` |
+
+IDs contain 1 to 24 lowercase ASCII letters, digits, or hyphens. Values contain
+1 to 128 printable ASCII bytes. Each record is stored in `/ledger/<id>`.
+The service processes one client at a time. `ledgerpull` performs an explicit
+single-record fetch and local commit. Authentication, automatic replication,
+and consensus remain outside this implementation.
+
+The host-client smoke test uses QEMU user networking. The two-guest test
+forwards Ethernet frames over an isolated QEMU socket link and independently
+checks the request and response bytes in a packet capture.

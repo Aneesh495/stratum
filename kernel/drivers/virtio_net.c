@@ -9,6 +9,12 @@
 static virtio_net_dev_t g_primary_net;
 static bool             g_primary_net_registered = false;
 
+/* Modern virtio always includes num_buffers in its header. Legacy omits it
+ * when the mergeable receive buffer feature is disabled. */
+static size_t header_size(const virtio_net_dev_t *dev) {
+    return dev->vdev.is_modern ? sizeof(virtio_net_hdr_t) : sizeof(virtio_net_hdr_t) - 2;
+}
+
 virtio_net_dev_t *virtio_net_get_primary(void) {
     return g_primary_net_registered ? &g_primary_net : NULL;
 }
@@ -16,7 +22,7 @@ virtio_net_dev_t *virtio_net_get_primary(void) {
 static int virtio_net_enqueue_rx(virtio_net_dev_t *dev, virtio_net_rx_buf_t *rx_buf) {
     vring_buf_t buf;
     buf.phys_addr = virt_to_phys(rx_buf);
-    buf.len = sizeof(virtio_net_rx_buf_t);
+    buf.len = (uint32_t)(header_size(dev) + VIRTIO_NET_MAX_FRAME);
     buf.is_write = true;
 
     return virtqueue_add_buf(dev->rx_vq, &buf, 0, 1, rx_buf);
@@ -46,7 +52,8 @@ int virtio_net_init(void) {
 
     /* Negotiate supported features */
     uint64_t features = VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS;
-    virtio_negotiate_features(&dev->vdev, features);
+    res = virtio_negotiate_features(&dev->vdev, features);
+    if (res != 0) return res;
 
     /* Setup RX queue (0) and TX queue (1) */
     dev->rx_vq = virtio_setup_queue(&dev->vdev, 0);
@@ -83,10 +90,9 @@ int virtio_net_init(void) {
         dev->rx_pool[i] = rx_buf;
         virtio_net_enqueue_rx(dev, rx_buf);
     }
-    virtqueue_kick(dev->rx_vq);
-
-    /* Mark driver as operational */
+    /* Enable DMA only once all queues have been configured. */
     virtio_driver_ok(&dev->vdev);
+    virtqueue_kick(dev->rx_vq);
     g_primary_net_registered = true;
 
     kprintf("[VIRTIO-NET] Network device initialized: MAC=%02x:%02x:%02x:%02x:%02x:%02x (link=%u)\n",
@@ -102,6 +108,10 @@ int virtio_net_transmit(virtio_net_dev_t *dev, const void *packet, size_t len) {
 
     uint64_t flags;
     spin_lock_irqsave(&dev->tx_lock, &flags);
+    if (dev->tx_failed) {
+        spin_unlock_irqrestore(&dev->tx_lock, flags);
+        return -STRATUM_EIO;
+    }
 
     /* Allocate header and packet copy */
     virtio_net_hdr_t *hdr = (virtio_net_hdr_t *)kmalloc(sizeof(virtio_net_hdr_t));
@@ -121,7 +131,7 @@ int virtio_net_transmit(virtio_net_dev_t *dev, const void *packet, size_t len) {
 
     vring_buf_t bufs[2];
     bufs[0].phys_addr = virt_to_phys(hdr);
-    bufs[0].len = sizeof(virtio_net_hdr_t);
+    bufs[0].len = (uint32_t)header_size(dev);
     bufs[0].is_write = false;
 
     bufs[1].phys_addr = virt_to_phys(pkt_buf);
@@ -149,15 +159,17 @@ int virtio_net_transmit(virtio_net_dev_t *dev, const void *packet, size_t len) {
         __asm__ volatile("pause");
     }
 
-    kfree(pkt_buf);
-    kfree(hdr);
-    spin_unlock_irqrestore(&dev->tx_lock, flags);
-
     if (!completed) {
+        /* DMA may still be in flight. Quarantine this queue and its buffers. */
+        dev->tx_failed = true;
+        spin_unlock_irqrestore(&dev->tx_lock, flags);
         kprintf("[VIRTIO-NET] Warning: TX packet timed out!\n");
         return -STRATUM_ETIMEDOUT;
     }
 
+    kfree(pkt_buf);
+    kfree(hdr);
+    spin_unlock_irqrestore(&dev->tx_lock, flags);
     return (int)len;
 }
 
@@ -175,12 +187,13 @@ int virtio_net_receive(virtio_net_dev_t *dev, void *buf, size_t max_len) {
     }
 
     int pkt_len = 0;
-    if (len > sizeof(virtio_net_hdr_t)) {
-        pkt_len = (int)(len - sizeof(virtio_net_hdr_t));
+    size_t header = header_size(dev);
+    if (len > header && len <= header + VIRTIO_NET_MAX_FRAME) {
+        pkt_len = (int)(len - header);
         if ((size_t)pkt_len > max_len) {
             pkt_len = (int)max_len;
         }
-        memcpy(buf, rx_buf->packet, (size_t)pkt_len);
+        memcpy(buf, (const uint8_t *)rx_buf + header, (size_t)pkt_len);
     }
 
     /* Replenish RX queue */

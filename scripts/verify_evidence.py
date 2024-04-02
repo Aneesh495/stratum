@@ -1,165 +1,106 @@
 #!/usr/bin/env python3
-"""
-scripts/verify_evidence.py - Independent Evidence and Negative Control Verifier (K64).
-Validates evidence manifest, artifact hashes, log integrity, and 12 negative controls:
-  1. Boot handoff bad magic rejection
-  2. Boot handoff bad version rejection
-  3. Kernel out-of-bounds address rejection
-  4. Memory map corrupt entries rejection
-  5. Usercopy illegal kernel space address rejection (-EFAULT / -14)
-  6. Ring 3 unprivileged instruction (#UD / #GP) rejection
-  7. Non-existent file open rejection (-ENOENT / -2)
-  8. StrataFS corrupted superblock magic rejection
-  9. StrataFS WAL corrupted CRC32 checksum rejection
-  10. Malformed IPv4 header checksum rejection
-  11. Corrupted TCP segment rejection
-  12. Malformed ledger signature / Merkle root rejection
-"""
+"""Verify a committed-source regression bundle without running or rewriting it."""
 
+import argparse
+from datetime import datetime
 import json
-import os
+from pathlib import Path
+import re
 import subprocess
 import sys
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EVIDENCE_DIR = os.path.join(PROJECT_ROOT, "evidence")
-MANIFEST_PATH = os.path.join(EVIDENCE_DIR, "evidence_manifest.json")
+from evidence_format import ARTIFACTS, COMMANDS, PROFILES, REQUIRED_TRANSCRIPTS, SCHEMA, file_hash
+from test_replication import check_capture
 
 
-def verify_manifest():
-    print("--- 1. Verifying Evidence Manifest Structure ---")
-    if not os.path.exists(MANIFEST_PATH):
-        print(f"[FAIL] Manifest not found: {MANIFEST_PATH}")
-        return False
-
-    with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    if data.get("overall_status") != "PASSED":
-        print(f"[FAIL] Manifest status is {data.get('overall_status')}, expected PASSED")
-        return False
-
-    gates = data.get("gates", [])
-    if len(gates) < 12:
-        print(f"[FAIL] Expected at least 12 gate entries, found {len(gates)}")
-        return False
-
-    for g in gates:
-        if g.get("status") != "PASSED":
-            print(f"[FAIL] Gate {g.get('gate')} status is {g.get('status')}")
-            return False
-        log_file = os.path.join(PROJECT_ROOT, g.get("log_file"))
-        if not os.path.exists(log_file) or os.path.getsize(log_file) == 0:
-            print(f"[FAIL] Missing or empty log file for gate {g.get('gate')}: {log_file}")
-            return False
-
-    print(f"[PASS] Manifest verified: {len(gates)} gates passed with complete logs.")
-    return True
+def check(condition, message):
+    if not condition:
+        raise ValueError(message)
 
 
-def verify_reproducibility():
-    print("\n--- 2. Verifying Bit-for-Bit Build Reproducibility ---")
-    with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    repro = data.get("reproducibility")
-    if not repro or not repro.get("reproducible"):
-        print("[FAIL] Reproducibility report missing or marked false.")
-        return False
-
-    artifacts = repro.get("artifacts", {})
-    required_arts = ["BOOTX64.EFI", "stratum.elf", "stratum-boot.img", "stratum-data.img"]
-    for art in required_arts:
-        if art not in artifacts:
-            print(f"[FAIL] Required artifact {art} missing from reproducibility report.")
-            return False
-        info = artifacts[art]
-        if not info.get("match") or info.get("build_a_hash") != info.get("build_b_hash"):
-            print(f"[FAIL] Hash mismatch for {art}: A={info.get('build_a_hash')} B={info.get('build_b_hash')}")
-            return False
-        print(f"  [PASS] {art:20s}: SHA-256 match ({info.get('build_a_hash')[:16]}...)")
-
-    return True
+def git(*args):
+    return subprocess.check_output(["git", *args], text=True, timeout=30).strip()
 
 
-def verify_negative_controls():
-    print("\n--- 3. Verifying 12 Independent Negative Controls ---")
-    clang = "/opt/homebrew/opt/llvm/bin/clang"
-    if not os.path.exists(clang):
-        clang = "clang"
+def verify(root):
+    data = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    check(data["schema"] == SCHEMA and data["kind"] == "regression", "unsupported schema or bundle kind")
+    check(data["full_acceptance"] == "unverified", "regression bundle cannot certify full acceptance")
+    check(datetime.fromisoformat(data["created_at"]).utcoffset() is not None, "missing timestamp offset")
+    check(data["host"]["system"] and data["host"]["machine"], "missing host identity")
+    check(not git("status", "--porcelain"), "current source tree is dirty")
+    check(data["source_commit"] == git("rev-parse", "HEAD"), "source commit does not match checkout")
+    check(data["source_tree"] == git("rev-parse", "HEAD^{tree}"), "source tree does not match checkout")
 
-    # Ensure fault injection and fuzz runner are compiled
-    os.makedirs(os.path.join(PROJECT_ROOT, "build"), exist_ok=True)
-    fault_bin = os.path.join(PROJECT_ROOT, "build", "test_faults")
-    fuzz_bin = os.path.join(PROJECT_ROOT, "build", "test_fuzz")
+    results = data["commands"]
+    check(results.keys() == COMMANDS.keys(), "missing or unexpected workload")
+    for name, expected in COMMANDS.items():
+        row = results[name]
+        check(row["command"] == list(expected), f"{name}: wrong command")
+        check(type(row["exit"]) is int and row["exit"] == 0, f"{name}: unsuccessful exit")
+        check(isinstance(row["seconds"], (int, float)) and 0 < row["seconds"] < 600, f"{name}: invalid duration")
 
-    if not os.path.exists(fault_bin):
-        res = subprocess.run([
-            clang, "-fsanitize=address,undefined", "-g", "-O1",
-            os.path.join(PROJECT_ROOT, "tests", "faults", "test_faults.c"),
-            "-o", fault_bin
-        ], cwd=PROJECT_ROOT)
-        if res.returncode != 0:
-            print("[FAIL] Failed to compile test_faults")
-            return False
+    paths = (
+        {f"logs/{name}.log" for name in COMMANDS}
+        | {f"artifacts/{label}/{name}" for label in ("build-a", "build-b") for name in ARTIFACTS}
+        | {f"transcripts/{name}" for name in REQUIRED_TRANSCRIPTS}
+    )
+    check(data["files"].keys() == paths, "missing or unexpected artifact")
+    for name in sorted(paths):
+        path = root / name
+        check(path.is_file() and path.resolve().is_relative_to(root.resolve()) and not path.is_symlink()
+              and path.stat().st_size > 0, f"{name}: missing, empty, or unsafe path")
+        check(file_hash(path) == data["files"][name], f"{name}: content digest mismatch")
 
-    if not os.path.exists(fuzz_bin):
-        res = subprocess.run([
-            clang, "-fsanitize=address,undefined", "-g", "-O2",
-            os.path.join(PROJECT_ROOT, "tests", "fuzz", "test_fuzz.c"),
-            "-o", fuzz_bin
-        ], cwd=PROJECT_ROOT)
-        if res.returncode != 0:
-            print("[FAIL] Failed to compile test_fuzz")
-            return False
+    for name in ARTIFACTS:
+        check(data["files"][f"artifacts/build-a/{name}"] == data["files"][f"artifacts/build-b/{name}"],
+              f"{name}: independent build outputs differ")
 
-    # Execute fault suite to test controls 1-12
-    res_fault = subprocess.run([fault_bin], capture_output=True, text=True, cwd=PROJECT_ROOT)
-    if res_fault.returncode != 0:
-        print("[FAIL] Fault injection suite execution failed.")
-        return False
+    def read(name):
+        return (root / name).read_text(encoding="utf-8", errors="replace")
 
-    # 12 Explicit Negative Control Assertions
-    controls = [
-        ("NC-01", "Boot handoff bad magic rejection", True),
-        ("NC-02", "Boot handoff bad version rejection", True),
-        ("NC-03", "Kernel out-of-bounds address rejection", True),
-        ("NC-04", "Memory map corrupt entries rejection", True),
-        ("NC-05", "Illegal usercopy from kernel space (-EFAULT / -14)", True),
-        ("NC-06", "Ring 3 unprivileged instruction (#UD / #GP)", True),
-        ("NC-07", "Non-existent file open rejection (-ENOENT / -2)", True),
-        ("NC-08", "StrataFS corrupted superblock magic rejection", "corrupted superblock mutations rejected" in res_fault.stdout),
-        ("NC-09", "StrataFS WAL corrupted CRC32 checksum rejection", True),
-        ("NC-10", "Malformed IPv4 header checksum rejection", "corrupted packet mutations rejected" in res_fault.stdout),
-        ("NC-11", "Corrupted TCP segment rejection", True),
-        ("NC-12", "Malformed ledger signature / Merkle root rejection", True),
-    ]
-
-    for cid, name, passed in controls:
-        if passed:
-            print(f"  [PASS] {cid}: {name}")
-        else:
-            print(f"  [FAIL] {cid}: {name}")
-            return False
-
-    return True
+    check(re.search(r"\(SHA-256 [0-9a-f]{64}\)", read("logs/doctor.log")), "firmware digest missing")
+    host = read("logs/host.log")
+    check("2000000 / 2000000 ops completed" in host and
+          "All deterministic models completed successfully" in host and
+          host.count("Completed: 350000 iterations") == 6, "host operation counts missing")
+    check(read("logs/boot.log").count("[PASS] rejected ") == 17, "loader rejection count mismatch")
+    for cpus, memory in PROFILES:
+        name = f"{cpus}cpu-{memory}"
+        boot = read(f"transcripts/smoke/{name}-boot.log")
+        reboot = read(f"transcripts/smoke/{name}-reboot.log")
+        check(f"Online CPUs:  {cpus}\n" in boot and "durable-alpha\ndurable-beta\n" in boot and
+              "durable-alpha\ndurable-beta\n" in reboot and "err=-2" in reboot, f"{name}: shell or recovery mismatch")
+    for cpus in (1, 2, 4, 8):
+        log = read(f"transcripts/diagnostics/stress-{cpus}.log")
+        check("64 fork/reap cycles" in log and "Guest stress smoke completed" in log,
+              f"{cpus} CPUs: missing ABI or stress observation")
+    check("Invalid Opcode (#UD)" in read("transcripts/diagnostics/faults-2.log"), "missing kernel fault diagnostic")
+    check("WAL published before home writes." in read("transcripts/recovery/interrupted.log") and
+          "Replayed committed transaction" in read("transcripts/recovery/replayed.log") and
+          "Journal initialization failed: -5" in read("transcripts/recovery/rejected.log"), "WAL recovery evidence mismatch")
+    check("duplicate/conflict handling" in read("logs/ledger.log"), "missing TCP ledger assertion results")
+    check("via-ethernet" in read("transcripts/replication/follower-reboot.log"), "missing follower recovery payload")
+    check_capture(root / "transcripts/replication/ethernet.pcap", b"GET peer-1\n", b"OK via-ethernet\n")
 
 
 def main():
-    print("===============================================================")
-    print("  Stratum OS Independent Evidence & Negative Control Verifier")
-    print("===============================================================\n")
-
-    if not verify_manifest():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("bundle", nargs="?", type=Path)
+    args = parser.parse_args()
+    root = args.bundle
+    if root is None:
+        candidates = sorted(path for path in Path("build/evidence").glob("20*") if path.is_dir())
+        if not candidates:
+            print("No regression bundle found. Run make evidence.", file=sys.stderr)
+            return 1
+        root = candidates[-1]
+    try:
+        verify(root)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"Evidence rejected: {error}", file=sys.stderr)
         return 1
-    if not verify_reproducibility():
-        return 1
-    if not verify_negative_controls():
-        return 1
-
-    print("\n===============================================================")
-    print("  [ALL PASSED] All Evidence and 12 Negative Controls Verified.")
-    print("===============================================================")
+    print(f"Verified regression bundle {root}. Full acceptance remains unverified.")
     return 0
 
 

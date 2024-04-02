@@ -1,5 +1,7 @@
 # ADR-0005: 64-Bit GDT, TSS, and Interrupt Stack Tables (IST)
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

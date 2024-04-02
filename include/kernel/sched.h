@@ -73,15 +73,14 @@ void      sched_init(void);
 void      sched_init_cpu(uint32_t cpu_id);
 void      sched_finish_switch(void);
 thread_t *thread_create(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio);
-thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio, pml4_t *as);
+thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio, pml4_t *as, struct process *process);
 void      thread_exit(void);
 void      thread_yield(void);
 void      thread_sleep_ms(uint32_t ms);
-void      thread_block(void);
 void      thread_wake(thread_t *thread);
 
 void      wait_queue_init(wait_queue_t *wq);
-void      wait_queue_wait(wait_queue_t *wq);
+void      wait_queue_wait_locked(wait_queue_t *wq, spinlock_t *condition, uint64_t flags);
 void      wait_queue_wake_one(wait_queue_t *wq);
 void      wait_queue_wake_all(wait_queue_t *wq);
 

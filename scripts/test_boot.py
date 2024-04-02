@@ -1,213 +1,68 @@
 #!/usr/bin/env python3
-"""
-scripts/test_boot.py - Automated boot validation and malformed image negative tests.
-Exercises 1, 2, 4, 8 CPUs, 64M, 256M, 1G profiles, and malformed ELF negative cases.
-"""
+"""Boot the normal image and exercise targeted malformed EFI loader inputs."""
 
-import os
+from pathlib import Path
 import shutil
 import struct
 import subprocess
-import sys
 import tempfile
-import time
 
-QEMU_BIN = "/opt/homebrew/bin/qemu-system-x86_64"
-OVMF_BIN = "/opt/homebrew/share/qemu/edk2-x86_64-code.fd"
-BOOT_IMG = "build/images/stratum-boot.img"
+from test_smoke import PROMPT
+from vm import BOOT_IMAGE, command, running, tool
 
 
-DATA_IMG = "build/images/stratum-data.img"
+def replace(data, offset, fmt, value):
+    mutated = bytearray(data)
+    struct.pack_into("<" + fmt, mutated, offset, value)
+    return mutated
 
 
-def run_guest(cpus, mem, timeout=45):
-    fresh_data = f"build/images/stratum-data-boot-{cpus}-{mem}.img"
-    shutil.copyfile(DATA_IMG, fresh_data)
-    cmd = [
-        QEMU_BIN,
-        "-machine", "q35,accel=tcg",
-        "-cpu", "qemu64,+nx,+apic",
-        "-smp", str(cpus),
-        "-m", mem,
-        "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_BIN}",
-        "-drive", f"file={BOOT_IMG},if=none,id=bootdisk,format=raw",
-        "-device", "ide-hd,drive=bootdisk,bootindex=1",
-        "-drive", f"file={fresh_data},if=none,id=datadisk,format=raw",
-        "-device", "virtio-blk-pci,drive=datadisk",
-        "-netdev", "user,id=net0",
-        "-device", "virtio-net-pci,netdev=net0",
-        "-display", "none",
-        "-serial", "stdio"
+def cases(kernel):
+    phoff = struct.unpack_from("<Q", kernel, 32)[0]
+    filesz = struct.unpack_from("<Q", kernel, phoff + 32)[0]
+    return [
+        ("magic", replace(kernel, 0, "I", 0), "header validation failed"),
+        ("class", replace(kernel, 4, "B", 1), "header validation failed"),
+        ("endianness", replace(kernel, 5, "B", 2), "header validation failed"),
+        ("ident-version", replace(kernel, 6, "B", 0), "header validation failed"),
+        ("dynamic", replace(kernel, 16, "H", 3), "header validation failed"),
+        ("machine", replace(kernel, 18, "H", 183), "header validation failed"),
+        ("version", replace(kernel, 20, "I", 0), "header validation failed"),
+        ("phoff-overflow", replace(kernel, 32, "Q", 2**64 - 32), "header validation failed"),
+        ("header-size", replace(kernel, 52, "H", 1), "header validation failed"),
+        ("program-header-size", replace(kernel, 54, "H", 1), "header validation failed"),
+        ("no-program-headers", replace(kernel, 56, "H", 0), "header validation failed"),
+        ("truncated-header", kernel[:32], "Failed to read kernel ELF header"),
+        ("entry-outside-executable", replace(kernel, 24, "Q", 0x400000), "Failed to load kernel ELF segments"),
+        ("writable-executable", replace(kernel, phoff + 4, "I", 7), "Failed to load kernel ELF segments"),
+        ("segment-offset", replace(kernel, phoff + 8, "Q", 2**64 - 1), "Failed to load kernel ELF segments"),
+        ("virtual-address", replace(kernel, phoff + 16, "Q", 2**64 - 8), "Failed to load kernel ELF segments"),
+        ("file-larger-than-memory", replace(kernel, phoff + 40, "Q", filesz - 1), "Failed to load kernel ELF segments"),
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    import fcntl
-    flags = fcntl.fcntl(proc.stdout, fcntl.F_GETFL)
-    fcntl.fcntl(proc.stdout, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-    start = time.time()
-    reached_idle = False
-    output = []
-
-    while time.time() - start < timeout:
-        try:
-            chunk = proc.stdout.read(4096)
-            if chunk:
-                output.append(chunk)
-                if "Entering kernel idle loop" in "".join(output):
-                    reached_idle = True
-                    break
-        except Exception:
-            pass
-        if proc.poll() is not None:
-            break
-        time.sleep(0.05)
-
-    proc.terminate()
-    try:
-        proc.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-
-    return reached_idle, "".join(output)
-
-
-def test_profiles():
-    print("Running Multi-Profile Boot Tests...")
-    profiles = [
-        (1, "256M"),
-        (2, "256M"),
-        (4, "256M"),
-        (8, "256M"),
-        (4, "1G"),
-        (1, "64M"),
-    ]
-
-    all_passed = True
-    for cpus, mem in profiles:
-        print(f"Testing profile: {cpus} CPU(s), {mem} RAM... ", end="", flush=True)
-        ok, out = run_guest(cpus, mem, timeout=15)
-        if ok:
-            print("[PASS]")
-        else:
-            print("[FAIL]")
-            print(f"Output:\n{out}")
-            all_passed = False
-
-    return all_passed
-
-
-def test_malformed_images():
-    print("\nRunning Malformed Loader Negative Tests...")
-    mcopy = "/opt/homebrew/bin/mcopy"
-    mformat = "/opt/homebrew/bin/mformat"
-    mmd = "/opt/homebrew/bin/mmd"
-
-    # Read original kernel bytes
-    with open("build/stratum.elf", "rb") as f:
-        orig_kernel = bytearray(f.read())
-
-    mutations = [
-        ("bad_magic", orig_kernel[:0] + b"\x7fBAD" + orig_kernel[4:]),
-        ("wrong_class_32bit", orig_kernel[:4] + b"\x01" + orig_kernel[5:]),
-        ("wrong_endian_big", orig_kernel[:5] + b"\x02" + orig_kernel[6:]),
-        ("wrong_machine_arm", orig_kernel[:18] + struct.pack("<H", 183) + orig_kernel[20:]),
-        ("truncated_header", orig_kernel[:32]),
-        ("corrupt_phoff", orig_kernel[:32] + struct.pack("<Q", 0xFFFFFFFFFFFFFF00) + orig_kernel[40:]),
-        ("zero_phnum", orig_kernel[:56] + struct.pack("<H", 0) + orig_kernel[58:]),
-    ]
-
-    passed_mutations = 0
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_img = os.path.join(tmpdir, "mutant_boot.img")
-
-        for name, mutant_data in mutations:
-            print(f"Testing negative case: {name}... ", end="", flush=True)
-
-            # Build mutant image
-            size_bytes = 64 * 1024 * 1024
-            total_sectors = size_bytes // 512
-            start_lba = 2048
-            sector_count = total_sectors - start_lba
-
-            with open(test_img, "wb") as f:
-                f.truncate(size_bytes)
-
-            with open(test_img, "r+b") as f:
-                f.seek(446)
-                entry = struct.pack("<BBBBBBBBII", 0x80, 0, 2, 0, 0xEF, 255, 255, 255, start_lba, sector_count)
-                f.write(entry)
-                f.seek(510)
-                f.write(b"\x55\xAA")
-
-            part_target = f"{test_img}@@1M"
-            subprocess.run([mformat, "-i", part_target, "-F", "::"], capture_output=True, check=True)
-            subprocess.run([mmd, "-i", part_target, "::/EFI"], capture_output=True, check=True)
-            subprocess.run([mmd, "-i", part_target, "::/EFI/BOOT"], capture_output=True, check=True)
-            subprocess.run([mcopy, "-i", part_target, "build/BOOTX64.EFI", "::/EFI/BOOT/BOOTX64.EFI"], capture_output=True, check=True)
-
-            mutant_elf = os.path.join(tmpdir, "mutant.elf")
-            with open(mutant_elf, "wb") as f:
-                f.write(mutant_data)
-
-            subprocess.run([mcopy, "-i", part_target, mutant_elf, "::/stratum.elf"], capture_output=True, check=True)
-
-            # Boot in QEMU and ensure loader reports error and rejects invalid kernel
-            cmd = [
-                QEMU_BIN,
-                "-machine", "q35,accel=tcg",
-                "-cpu", "qemu64,+nx,+apic",
-                "-smp", "1",
-                "-m", "256M",
-                "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_BIN}",
-                "-drive", f"file={test_img},if=none,id=bootdisk,format=raw",
-                "-device", "ide-hd,drive=bootdisk,bootindex=1",
-                "-display", "none",
-                "-serial", "stdio"
-            ]
-
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            start = time.time()
-            observed_rejection = False
-            output = []
-
-            while time.time() - start < 8:
-                line = proc.stdout.readline()
-                if line:
-                    output.append(line)
-                    if "ERROR:" in line or "validation failed" in line or "Access Denied" in line:
-                        observed_rejection = True
-                        break
-                elif proc.poll() is not None:
-                    break
-
-            proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-
-            if observed_rejection:
-                print("[PASS] (safely rejected by loader)")
-                passed_mutations += 1
-            else:
-                print(f"[FAIL] (rejection not observed)")
-                print("".join(output))
-
-    print(f"\nNegative tests: {passed_mutations}/{len(mutations)} safely rejected.")
-    return passed_mutations == len(mutations)
 
 
 def main():
-    ok_profiles = test_profiles()
-    ok_neg = test_malformed_images()
+    logs = Path("build/boot")
+    with running(command(BOOT_IMAGE, cpus=2), logs / "no-disk.log") as guest:
+        reply = guest.expect(PROMPT)
+        if b"Root mount failed" not in reply:
+            raise RuntimeError("missing no-disk diagnostic")
 
-    if ok_profiles and ok_neg:
-        print("\nAll Boot and Loader Acceptance Tests Passed.")
-        return 0
-    else:
-        print("\nBoot Acceptance Tests Failed.")
-        return 1
+    kernel = Path("build/stratum.elf").read_bytes()
+    with tempfile.TemporaryDirectory(dir="build") as directory:
+        image = Path(directory) / BOOT_IMAGE.name
+        mutated = Path(directory) / "stratum.elf"
+        for name, data, error in cases(kernel):
+            shutil.copyfile(BOOT_IMAGE, image)
+            mutated.write_bytes(data)
+            subprocess.run([tool("mcopy"), "-o", "-i", f"{image}@@1M",
+                            str(mutated), "::/stratum.elf"], check=True, timeout=10)
+            with running(command(image, cpus=1), logs / f"{name}.log") as guest:
+                transcript = guest.expect(error)
+                if b"Kernel entered at higher-half entry point" in transcript:
+                    raise RuntimeError(f"loader entered the kernel for {name}")
+            print(f"[PASS] rejected {name}", flush=True)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

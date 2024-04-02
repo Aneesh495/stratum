@@ -1,87 +1,37 @@
 #!/usr/bin/env python3
-"""
-scripts/doctor.py - Toolchain, firmware, and host verification for Stratum OS.
-"""
+"""Check the compiler, image tools, emulator, and UEFI firmware."""
 
-import hashlib
-import os
-import shutil
+from hashlib import sha256
+from pathlib import Path
 import subprocess
 import sys
 
-REQUIRED_TOOLS = [
-    ("Clang", ["/opt/homebrew/opt/llvm/bin/clang", "clang"], "--version"),
-    ("LLD Linker", ["/opt/homebrew/opt/llvm/bin/ld.lld", "ld.lld"], "--version"),
-    ("NASM Assembler", ["/opt/homebrew/bin/nasm", "nasm"], "-v"),
-    ("llvm-objcopy", ["/opt/homebrew/opt/llvm/bin/llvm-objcopy", "llvm-objcopy"], "--version"),
-    ("mformat", ["/opt/homebrew/bin/mformat", "mformat"], "--version"),
-    ("mcopy", ["/opt/homebrew/bin/mcopy", "mcopy"], "--version"),
-    ("QEMU x86-64", ["/opt/homebrew/bin/qemu-system-x86_64", "qemu-system-x86_64"], "--version"),
-]
-
-OVMF_PATHS = [
-    "/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
-    "/usr/share/OVMF/OVMF_CODE.fd",
-    "/usr/share/qemu/edk2-x86_64-code.fd",
-]
-
-EXPECTED_OVMF_SHA256 = "33090cc07675baa5190d9f1e84bf5176b33bcbfa9bacac522961150cdb6dbb2a"
-
-
-def find_tool(candidates):
-    for c in candidates:
-        if os.path.isabs(c):
-            if os.path.exists(c) and os.access(c, os.X_OK):
-                return c
-        else:
-            p = shutil.which(c)
-            if p:
-                return p
-    return None
+from vm import firmware, tool
 
 
 def main():
-    print("Stratum OS Environment Doctor")
-    print("==============================")
-    all_ok = True
+    failures = 0
+    for name, flag in (("clang", "--version"), ("lld", "--version"),
+                       ("ld.lld", "--version"), ("nasm", "-v"),
+                       ("mformat", "--version"), ("mcopy", "--version"),
+                       ("mmd", "--version"), ("qemu-system-x86_64", "--version")):
+        binary = tool(name)
+        args = [binary, "-flavor", "gnu", flag] if name == "lld" else [binary, flag]
+        try:
+            result = subprocess.run(args, capture_output=True, text=True, check=True, timeout=10)
+            lines = (result.stdout or result.stderr).strip().splitlines()
+            print(f"[OK] {binary} ({lines[0] if lines else 'available'})")
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f"[FAIL] {binary}: {error}")
+            failures += 1
 
-    for name, candidates, flag in REQUIRED_TOOLS:
-        path = find_tool(candidates)
-        if not path:
-            print(f"[FAIL] {name}: not found (tried {candidates})")
-            all_ok = False
-        else:
-            try:
-                res = subprocess.run([path, flag], capture_output=True, text=True, check=True)
-                line = res.stdout.splitlines()[0] if res.stdout else res.stderr.splitlines()[0]
-                print(f"[OK]   {name}: {path} ({line.strip()})")
-            except Exception as e:
-                print(f"[FAIL] {name}: {path} error executing {flag}: {e}")
-                all_ok = False
-
-    ovmf_found = None
-    for p in OVMF_PATHS:
-        if os.path.exists(p):
-            ovmf_found = p
-            break
-
-    if not ovmf_found:
-        print(f"[FAIL] OVMF Firmware: not found in {OVMF_PATHS}")
-        all_ok = False
+    path = Path(firmware())
+    if not path.is_file():
+        print(f"[FAIL] Firmware missing at {path}. Set OVMF to a readable x86-64 OVMF code image.")
+        failures += 1
     else:
-        with open(ovmf_found, "rb") as f:
-            h = hashlib.sha256(f.read()).hexdigest()
-        if h == EXPECTED_OVMF_SHA256:
-            print(f"[OK]   OVMF Firmware: {ovmf_found} (hash match: {h[:16]}...)")
-        else:
-            print(f"[WARN] OVMF Firmware: {ovmf_found} hash {h} != expected {EXPECTED_OVMF_SHA256}")
-
-    if all_ok:
-        print("\nAll required toolchain and platform dependencies verified.")
-        return 0
-    else:
-        print("\nOne or more dependencies failed verification.")
-        return 1
+        print(f"[OK] {path} (SHA-256 {sha256(path.read_bytes()).hexdigest()})")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

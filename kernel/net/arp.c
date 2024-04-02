@@ -14,9 +14,6 @@ void arp_init(void) {
         g_arp_table[i].valid = false;
     }
 
-    /* Seed default gateway (10.0.2.2) and DNS (10.0.2.3) with standard QEMU slirp MAC (52:55:0a:00:02:02) */
-    uint8_t qemu_gw_mac[ETH_ALEN] = { 0x52, 0x55, 0x0A, 0x00, 0x02, 0x02 };
-    arp_insert(IP4_ADDR(10, 0, 2, 2), qemu_gw_mac);
 }
 
 int arp_insert(uint32_t ip, const uint8_t *mac) {
@@ -71,12 +68,6 @@ int arp_lookup(uint32_t ip, uint8_t *out_mac) {
     }
 
     spin_unlock_irqrestore(&g_arp_lock, flags);
-
-    /* Fallback: if destination is in another subnet, use gateway MAC */
-    netif_t *nif = net_get_default_if();
-    if (nif && (ip & nif->netmask) != (nif->ip_addr & nif->netmask)) {
-        return arp_lookup(nif->gateway, out_mac);
-    }
 
     return -STRATUM_ENOENT;
 }
@@ -138,13 +129,15 @@ int arp_input(pbuf_t *p) {
     uint32_t target_ip = ntohl(arp->target_ip);
     uint16_t opcode = ntohs(arp->opcode);
 
-    /* Cache sender mapping */
-    arp_insert(sender_ip, arp->sender_mac);
-
     netif_t *nif = net_get_default_if();
     if (!nif) return -STRATUM_ENODEV;
 
-    if (opcode == ARP_OP_REQUEST && target_ip == nif->ip_addr) {
+    if (arp->hw_len != ETH_ALEN || arp->proto_len != 4 ||
+        (opcode != ARP_OP_REQUEST && opcode != ARP_OP_REPLY)) return -STRATUM_EINVAL;
+    if (target_ip != nif->ip_addr) return 0;
+    if (opcode == ARP_OP_REPLY && memcmp(arp->target_mac, nif->mac, ETH_ALEN)) return -STRATUM_EINVAL;
+    if (sender_ip && !(arp->sender_mac[0] & 1)) arp_insert(sender_ip, arp->sender_mac);
+    if (opcode == ARP_OP_REQUEST) {
         /* Answer request */
         return arp_send_reply(nif, sender_ip, arp->sender_mac);
     }

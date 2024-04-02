@@ -1,4 +1,5 @@
 #include <kernel/sched.h>
+#include <kernel/process.h>
 #include <kernel/smp.h>
 #include <kernel/pmm.h>
 #include <kernel/slab.h>
@@ -15,7 +16,7 @@ extern void timer_add_sleeper(thread_t *thread, uint32_t ms);
 
 static thread_t   g_thread_pool[SCHED_MAX_THREADS];
 static spinlock_t g_thread_pool_lock = SPINLOCK_INIT;
-static uint32_t   g_next_tid = 1;
+static uint32_t   g_next_tid = SMP_MAX_CPUS + 1;
 
 runqueue_t g_runqueues[SMP_MAX_CPUS];
 
@@ -61,9 +62,8 @@ static thread_t *rq_steal_work(uint32_t my_cpu) {
         if (i == my_cpu) continue;
 
         runqueue_t *other_rq = &g_runqueues[i];
-        if (other_rq->nr_running > 0) {
-            uint64_t flags;
-            spin_lock_irqsave(&other_rq->lock, &flags);
+        /* Our runqueue is already locked, so never wait on another one. */
+        if (spin_trylock(&other_rq->lock)) {
             thread_t *stolen = NULL;
             for (int p = THREAD_PRIO_HIGH; p >= THREAD_PRIO_LOW; p--) {
                 thread_t *prev = NULL;
@@ -90,7 +90,7 @@ static thread_t *rq_steal_work(uint32_t my_cpu) {
                 }
                 if (stolen) break;
             }
-            spin_unlock_irqrestore(&other_rq->lock, flags);
+            spin_unlock(&other_rq->lock);
             if (stolen) return stolen;
         }
     }
@@ -102,19 +102,26 @@ void sched_finish_switch(void) {
     runqueue_t *rq = &g_runqueues[cpu_id];
     thread_t *prev = rq->prev_thread;
     if (prev) {
+        spin_lock(&rq->lock);
         prev->on_cpu = false;
         rq->prev_thread = NULL;
+        spin_unlock(&rq->lock);
         if (prev->state == THREAD_STATE_ZOMBIE) {
+            if (prev->process) process_finish_exit(prev->process);
             if (prev->kernel_stack_base) {
                 pmm_free_pages(virt_to_phys((void *)prev->kernel_stack_base), 2);
                 prev->kernel_stack_base = 0;
             }
+            spin_lock(&g_thread_pool_lock);
             prev->state = THREAD_STATE_UNUSED;
+            spin_unlock(&g_thread_pool_lock);
         }
     }
 }
 
 void sched_init_cpu(uint32_t cpu_id) {
+    /* Floating-point state is unavailable until it is saved per thread. */
+    write_cr0(read_cr0() | CR0_WP | CR0_TS);
     runqueue_t *rq = &g_runqueues[cpu_id];
     memset(rq, 0, sizeof(runqueue_t));
     spin_lock_init(&rq->lock);
@@ -125,7 +132,7 @@ void sched_init_cpu(uint32_t cpu_id) {
 
     thread_t *idle = &g_thread_pool[cpu_id];
     memset(idle, 0, sizeof(thread_t));
-    idle->tid = g_next_tid++;
+    idle->tid = cpu_id + 1;
     strncpy(idle->name, idle_name, sizeof(idle->name) - 1);
     idle->state = THREAD_STATE_RUNNING;
     idle->priority = THREAD_PRIO_IDLE;
@@ -141,8 +148,6 @@ void sched_init_cpu(uint32_t cpu_id) {
 }
 
 void sched_init(void) {
-    memset(g_thread_pool, 0, sizeof(g_thread_pool));
-
     /* Initialize BSP runqueue */
     sched_init_cpu(0);
 
@@ -152,7 +157,7 @@ void sched_init(void) {
     kprintf("[SCHED] Preemptive SMP Scheduler initialized (O(1) priority queues, work stealing enabled)\n");
 }
 
-thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio, pml4_t *as) {
+thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio, pml4_t *as, process_t *process) {
     if (!entry) return NULL;
 
     uint64_t flags;
@@ -178,6 +183,7 @@ thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg,
     t->priority = prio;
     t->on_cpu = false;
     t->address_space = as;
+    t->process = process;
 
     /* Allocate 16 KiB stack */
     uint64_t stack_phys = pmm_alloc_pages(2);
@@ -194,7 +200,7 @@ thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg,
     *(--sp) = (uint64_t)arg;                /* Arg to pop in trampoline */
     *(--sp) = (uint64_t)entry;              /* Entry to call */
     *(--sp) = (uint64_t)thread_trampoline;  /* RIP for ret */
-    *(--sp) = 0x202;                        /* RFLAGS with IF enabled */
+    *(--sp) = 0x002;                        /* Enable IRQs after finishing the switch */
     *(--sp) = 0;                            /* RBP */
     *(--sp) = 0;                            /* RBX */
     *(--sp) = 0;                            /* R12 */
@@ -210,13 +216,17 @@ thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg,
     if (online == 0) online = 1;
 
     for (uint32_t c = 0; c < online; c++) {
-        if (g_runqueues[c].nr_running < min_running) {
-            min_running = g_runqueues[c].nr_running;
+        spin_lock(&g_runqueues[c].lock);
+        uint32_t running = g_runqueues[c].nr_running;
+        spin_unlock(&g_runqueues[c].lock);
+        if (running < min_running) {
+            min_running = running;
             target_cpu = c;
         }
     }
 
     t->assigned_cpu = target_cpu;
+    if (process) process->main_thread = t;
 
     runqueue_t *rq = &g_runqueues[target_cpu];
     uint64_t rq_flags;
@@ -235,7 +245,7 @@ thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg,
 }
 
 thread_t *thread_create(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio) {
-    return thread_create_user(name, entry, arg, prio, NULL);
+    return thread_create_user(name, entry, arg, prio, NULL, NULL);
 }
 
 void sched_reschedule(void) {
@@ -266,9 +276,8 @@ void sched_reschedule(void) {
     }
 
     if (curr == next) {
-        if (curr->state == THREAD_STATE_RUNNING) {
-            curr->timeslice_remaining = SCHED_DEFAULT_TIMESLICE;
-        }
+        curr->state = THREAD_STATE_RUNNING;
+        curr->timeslice_remaining = SCHED_DEFAULT_TIMESLICE;
         spin_unlock(&rq->lock);
         local_irq_restore(flags);
         return;
@@ -307,21 +316,14 @@ void thread_yield(void) {
 }
 
 void thread_sleep_ms(uint32_t ms) {
+    uint64_t flags = local_irq_save();
     uint32_t cpu_id = smp_get_cpu_id();
     thread_t *curr = g_runqueues[cpu_id].current_thread;
     if (curr) {
         timer_add_sleeper(curr, ms);
         sched_reschedule();
     }
-}
-
-void thread_block(void) {
-    uint32_t cpu_id = smp_get_cpu_id();
-    thread_t *curr = g_runqueues[cpu_id].current_thread;
-    if (curr) {
-        curr->state = THREAD_STATE_BLOCKED;
-        sched_reschedule();
-    }
+    local_irq_restore(flags);
 }
 
 void thread_wake(thread_t *thread) {
@@ -332,21 +334,12 @@ void thread_wake(thread_t *thread) {
     spin_lock_irqsave(&rq->lock, &flags);
     rq_enqueue(rq, thread);
 
-    bool need_ipi = false;
     uint32_t target_cpu = thread->assigned_cpu;
-    uint32_t my_cpu = smp_get_cpu_id();
-
-    if (rq->current_thread && thread->priority > rq->current_thread->priority) {
-        need_ipi = true;
-    }
     spin_unlock_irqrestore(&rq->lock, flags);
 
-    if (need_ipi) {
-        if (target_cpu != my_cpu) {
-            smp_send_ipi(g_cpus[target_cpu].lapic_id, VEC_IPI_RESCHED);
-        } else {
-            sched_reschedule();
-        }
+    /* The caller may still hold the lock protecting the wait condition. */
+    if (target_cpu != smp_get_cpu_id()) {
+        smp_send_ipi(g_cpus[target_cpu].lapic_id, VEC_IPI_RESCHED);
     }
 }
 
@@ -356,19 +349,16 @@ void wait_queue_init(wait_queue_t *wq) {
     wq->head = NULL;
 }
 
-void wait_queue_wait(wait_queue_t *wq) {
-    if (!wq) return;
-    uint32_t cpu_id = smp_get_cpu_id();
-    thread_t *curr = g_runqueues[cpu_id].current_thread;
-    if (!curr) return;
-
-    uint64_t flags;
-    spin_lock_irqsave(&wq->lock, &flags);
+void wait_queue_wait_locked(wait_queue_t *wq, spinlock_t *condition, uint64_t flags) {
+    thread_t *curr = g_runqueues[smp_get_cpu_id()].current_thread;
+    spin_lock(&wq->lock);
+    curr->state = THREAD_STATE_BLOCKED;
     curr->wait_next = wq->head;
     wq->head = curr;
-    spin_unlock_irqrestore(&wq->lock, flags);
-
-    thread_block();
+    spin_unlock(&wq->lock);
+    spin_unlock(condition);
+    sched_reschedule();
+    local_irq_restore(flags);
 }
 
 void wait_queue_wake_one(wait_queue_t *wq) {
@@ -403,6 +393,7 @@ void wait_queue_wake_all(wait_queue_t *wq) {
 }
 
 void thread_exit(void) {
+    cli();
     uint32_t cpu_id = smp_get_cpu_id();
     thread_t *curr = g_runqueues[cpu_id].current_thread;
     if (curr) {
@@ -427,6 +418,7 @@ void sched_tick(interrupt_frame_t *frame) {
     thread_t *curr = rq->current_thread;
 
     bool need_resched = false;
+    spin_lock(&rq->lock);
     if (curr == rq->idle_thread && rq->nr_running > 0) {
         need_resched = true;
     } else if (curr && curr != rq->idle_thread) {
@@ -447,6 +439,7 @@ void sched_tick(interrupt_frame_t *frame) {
         }
     }
 
+    spin_unlock(&rq->lock);
     if (need_resched) {
         sched_reschedule();
     }

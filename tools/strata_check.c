@@ -16,6 +16,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <errno.h>
+#include <stddef.h>
 
 #define STRATAFS_MAGIC              0x5354524154414653ULL /* "STRATAFS" */
 #define STRATAFS_VERSION            1
@@ -49,7 +50,7 @@ typedef struct {
     uint32_t mount_count;
     uint32_t clean_shutdown;
     uint32_t checksum;
-    uint8_t  padding[4008];
+    uint8_t  padding[4000];
 } __attribute__((packed)) stratafs_sb_t;
 
 typedef struct {
@@ -66,7 +67,7 @@ typedef struct {
     uint32_t indirect;
     uint32_t double_indirect;
     uint32_t flags;
-    uint32_t reserved[9];
+    uint32_t reserved[5];
 } __attribute__((packed)) stratafs_disk_inode_t;
 
 typedef struct {
@@ -105,6 +106,42 @@ static inline void bitmap_set(uint8_t *bitmap, uint32_t bit) {
     bitmap[bit / 8] |= (uint8_t)(1U << (bit % 8));
 }
 
+_Static_assert(sizeof(stratafs_sb_t) == STRATAFS_BLOCK_SIZE, "superblock layout");
+_Static_assert(sizeof(stratafs_disk_inode_t) == STRATAFS_INODE_SIZE, "inode stride");
+
+static uint32_t crc32(const void *data, size_t len) {
+    const uint8_t *bytes = data;
+    uint32_t value = UINT32_MAX;
+    for (size_t i = 0; i < len; i++) {
+        value ^= bytes[i];
+        for (unsigned b = 0; b < 8; b++) {
+            uint32_t polynomial = value & 1 ? UINT32_C(0xEDB88320) : 0;
+            value = (value >> 1) ^ polynomial;
+        }
+    }
+    return ~value;
+}
+
+static bool valid_directory_block(FILE *fp, uint32_t block, uint32_t ino, uint32_t limit,
+                                  const uint8_t *inode_bitmap) {
+    stratafs_disk_dirent_t entries[STRATAFS_BLOCK_SIZE / sizeof(stratafs_disk_dirent_t)];
+    if (!read_block(fp, block, entries)) return false;
+    for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
+        const stratafs_disk_dirent_t *entry = &entries[i];
+        if (!entry->inode_num) continue;
+        if (entry->record_len != sizeof(*entry) || !entry->name_len ||
+            entry->name_len >= sizeof(entry->name) ||
+            memchr(entry->name, 0, entry->name_len) ||
+            memchr(entry->name, '/', entry->name_len) ||
+            entry->inode_num >= limit || !bitmap_get(inode_bitmap, entry->inode_num) ||
+            (entry->file_type != 1 && entry->file_type != 2)) {
+            fprintf(stderr, "Error: malformed directory entry in inode %u, slot %zu.\n", ino, i);
+            return false;
+        }
+    }
+    return true;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <stratafs_disk_image>\n", argv[0]);
@@ -129,22 +166,25 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (sb.magic != STRATAFS_MAGIC) {
-        fprintf(stderr, "Error: invalid StrataFS magic: 0x%016llx (expected 0x%016llx)\n",
-                (unsigned long long)sb.magic, (unsigned long long)STRATAFS_MAGIC);
+    uint32_t expected_crc = sb.checksum;
+    sb.checksum = 0;
+    if (fseek(fp, 0, SEEK_END) != 0) {
         fclose(fp);
         return 1;
     }
-
-    if (sb.version != STRATAFS_VERSION) {
-        fprintf(stderr, "Error: unsupported filesystem version %u\n", sb.version);
-        fclose(fp);
-        return 1;
-    }
-
-    if (sb.block_size != STRATAFS_BLOCK_SIZE) {
-        fprintf(stderr, "Error: invalid block size %u (expected %u)\n",
-                sb.block_size, STRATAFS_BLOCK_SIZE);
+    long image_bytes = ftell(fp);
+    if (image_bytes < 0 || sb.magic != STRATAFS_MAGIC || sb.version != STRATAFS_VERSION ||
+        sb.block_size != STRATAFS_BLOCK_SIZE || sb.total_blocks < 1024 ||
+        sb.total_blocks > STRATAFS_BLOCK_SIZE * 8U ||
+        sb.total_blocks != (uint64_t)image_bytes / STRATAFS_BLOCK_SIZE ||
+        sb.total_inodes != 2048 || sb.root_inode != STRATAFS_ROOT_INO ||
+        sb.block_bitmap_block != 2 || sb.block_bitmap_blocks != 1 ||
+        sb.inode_bitmap_block != 3 || sb.inode_bitmap_blocks != 1 ||
+        sb.inode_table_block != 4 || sb.inode_table_blocks != 64 ||
+        sb.journal_start_block != 68 || sb.journal_block_count != 512 ||
+        sb.data_start_block != 580 || sb.data_block_count != sb.total_blocks - 580 ||
+        expected_crc != crc32(&sb, offsetof(stratafs_sb_t, checksum) + sizeof(sb.checksum))) {
+        fprintf(stderr, "Error: invalid StrataFS superblock geometry or checksum.\n");
         fclose(fp);
         return 1;
     }
@@ -161,40 +201,27 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (jsb.magic != JOURNAL_MAGIC_SB) {
-        fprintf(stderr, "Error: invalid journal magic: 0x%016llx\n", (unsigned long long)jsb.magic);
+    if (jsb.magic != JOURNAL_MAGIC_SB || jsb.block_size != STRATAFS_BLOCK_SIZE ||
+        jsb.total_blocks != sb.journal_block_count ||
+        jsb.head_block == 0 || jsb.head_block >= jsb.total_blocks ||
+        jsb.tail_block != jsb.head_block || jsb.sequence_num == 0 || jsb.flags != 1 ||
+        jsb.checksum != crc32(&jsb, offsetof(journal_sb_t, checksum))) {
+        fprintf(stderr, "Error: invalid or uncheckpointed journal. Inspect after successful recovery.\n");
         fclose(fp);
         return 1;
     }
     printf("[OK] Journal valid: head=%u, tail=%u, seq=%llu, total_blocks=%u\n",
            jsb.head_block, jsb.tail_block, (unsigned long long)jsb.sequence_num, jsb.total_blocks);
 
-    /* 3. Read Inode and Block Bitmaps */
-    size_t bb_size = (size_t)sb.block_bitmap_blocks * STRATAFS_BLOCK_SIZE;
-    uint8_t *disk_b_bitmap = (uint8_t *)malloc(bb_size);
-    for (uint32_t b = 0; b < sb.block_bitmap_blocks; b++) {
-        if (!read_block(fp, sb.block_bitmap_block + b, disk_b_bitmap + (b * STRATAFS_BLOCK_SIZE))) {
-            fprintf(stderr, "Error: failed to read block bitmap block %u\n", sb.block_bitmap_block + b);
-            free(disk_b_bitmap);
-            fclose(fp);
-            return 1;
-        }
+    uint8_t disk_b_bitmap[STRATAFS_BLOCK_SIZE];
+    uint8_t disk_i_bitmap[STRATAFS_BLOCK_SIZE];
+    uint8_t reach_b_bitmap[STRATAFS_BLOCK_SIZE] = {0};
+    if (!read_block(fp, sb.block_bitmap_block, disk_b_bitmap) ||
+        !read_block(fp, sb.inode_bitmap_block, disk_i_bitmap)) {
+        fprintf(stderr, "Error: cannot read allocation bitmaps.\n");
+        fclose(fp);
+        return 1;
     }
-
-    size_t ib_size = (size_t)sb.inode_bitmap_blocks * STRATAFS_BLOCK_SIZE;
-    uint8_t *disk_i_bitmap = (uint8_t *)malloc(ib_size);
-    for (uint32_t b = 0; b < sb.inode_bitmap_blocks; b++) {
-        if (!read_block(fp, sb.inode_bitmap_block + b, disk_i_bitmap + (b * STRATAFS_BLOCK_SIZE))) {
-            fprintf(stderr, "Error: failed to read inode bitmap block %u\n", sb.inode_bitmap_block + b);
-            free(disk_b_bitmap);
-            free(disk_i_bitmap);
-            fclose(fp);
-            return 1;
-        }
-    }
-
-    /* Allocate tracking bitmap for reachable blocks */
-    uint8_t *reach_b_bitmap = (uint8_t *)calloc(1, bb_size);
 
     /* Mark metadata blocks as reachable */
     bitmap_set(reach_b_bitmap, 0); /* Reserved boot block */
@@ -208,18 +235,18 @@ int main(int argc, char **argv) {
     uint32_t active_inodes = 0;
     uint32_t dir_count = 0;
     uint32_t reg_count = 0;
-    bool has_error = false;
+    bool has_error = !bitmap_get(disk_i_bitmap, 0) || !bitmap_get(disk_i_bitmap, STRATAFS_ROOT_INO);
 
     uint8_t inode_buf[STRATAFS_BLOCK_SIZE];
 
-    for (uint32_t ino = 1; ino <= sb.total_inodes; ino++) {
+    for (uint32_t ino = 1; ino < sb.total_inodes; ino++) {
         bool is_alloc = bitmap_get(disk_i_bitmap, ino);
         if (!is_alloc) continue;
 
         active_inodes++;
 
-        uint32_t block_idx = sb.inode_table_block + ((ino - 1) / STRATAFS_INODES_PER_BLOCK);
-        uint32_t offset = ((ino - 1) % STRATAFS_INODES_PER_BLOCK) * STRATAFS_INODE_SIZE;
+        uint32_t block_idx = sb.inode_table_block + (ino / STRATAFS_INODES_PER_BLOCK);
+        uint32_t offset = (ino % STRATAFS_INODES_PER_BLOCK) * STRATAFS_INODE_SIZE;
 
         if (!read_block(fp, block_idx, inode_buf)) {
             fprintf(stderr, "Error: failed to read inode table block %u for ino %u\n", block_idx, ino);
@@ -228,8 +255,15 @@ int main(int argc, char **argv) {
         }
 
         stratafs_disk_inode_t *din = (stratafs_disk_inode_t *)(inode_buf + offset);
-        if ((din->mode & 0170000) == 0040000) dir_count++;
-        else reg_count++;
+        uint16_t type = din->mode & 0170000;
+        if (type == 0040000) dir_count++;
+        else if (type == 0100000) reg_count++;
+        if ((type != 0040000 && type != 0100000) ||
+            (ino == STRATAFS_ROOT_INO && type != 0040000) ||
+            !din->nlink || din->double_indirect) {
+            fprintf(stderr, "Error: inode %u has invalid type, link count or addressing.\n", ino);
+            has_error = true;
+        }
 
         /* Check direct block pointers */
         for (int d = 0; d < STRATAFS_NDIR_BLOCKS; d++) {
@@ -248,24 +282,8 @@ int main(int argc, char **argv) {
             }
             bitmap_set(reach_b_bitmap, bnum);
 
-            /* If directory, validate directory entries */
-            if ((din->mode & 0170000) == 0040000) {
-                uint8_t dir_blk[STRATAFS_BLOCK_SIZE];
-                if (read_block(fp, bnum, dir_blk)) {
-                    uint32_t pos = 0;
-                    while (pos + sizeof(stratafs_disk_dirent_t) <= STRATAFS_BLOCK_SIZE) {
-                        stratafs_disk_dirent_t *de = (stratafs_disk_dirent_t *)(dir_blk + pos);
-                        if (de->record_len == 0) break;
-                        if (de->inode_num != 0) {
-                            if (de->inode_num > sb.total_inodes || !bitmap_get(disk_i_bitmap, de->inode_num)) {
-                                fprintf(stderr, "Error: directory ino %u has entry '%s' with unallocated inode %u\n",
-                                        ino, de->name, de->inode_num);
-                                has_error = true;
-                            }
-                        }
-                        pos += de->record_len;
-                    }
-                }
+            if (type == 0040000 && !valid_directory_block(fp, bnum, ino, sb.total_inodes, disk_i_bitmap)) {
+                has_error = true;
             }
         }
 
@@ -276,6 +294,10 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Error: inode %u indirect block out of bounds: %u\n", ino, iblk);
                 has_error = true;
             } else {
+                if (bitmap_get(reach_b_bitmap, iblk)) {
+                    fprintf(stderr, "Error: indirect block %u multiply referenced.\n", iblk);
+                    has_error = true;
+                }
                 bitmap_set(reach_b_bitmap, iblk);
                 uint32_t indir_ptrs[STRATAFS_BLOCK_SIZE / sizeof(uint32_t)];
                 if (read_block(fp, iblk, indir_ptrs)) {
@@ -292,7 +314,12 @@ int main(int argc, char **argv) {
                             has_error = true;
                         }
                         bitmap_set(reach_b_bitmap, pb);
+                        if (type == 0040000 && !valid_directory_block(fp, pb, ino, sb.total_inodes, disk_i_bitmap)) {
+                            has_error = true;
+                        }
                     }
+                } else {
+                    has_error = true;
                 }
             }
         }
@@ -304,10 +331,12 @@ int main(int argc, char **argv) {
     /* 5. Cross-check Reachable Blocks with On-Disk Block Bitmap */
     uint32_t leaks = 0;
     uint32_t unrecorded = 0;
+    uint32_t allocated = 0;
 
     for (uint32_t b = 0; b < sb.total_blocks; b++) {
         bool on_disk = bitmap_get(disk_b_bitmap, b);
         bool reachable = bitmap_get(reach_b_bitmap, b);
+        if (on_disk) allocated++;
 
         if (on_disk && !reachable) {
             leaks++;
@@ -317,16 +346,19 @@ int main(int argc, char **argv) {
     }
 
     if (leaks > 0) {
-        printf("[WARN] %u blocks allocated on disk but unreachable (clean after journal flush)\n", leaks);
+        fprintf(stderr, "Error: %u allocated blocks lack an owner.\n", leaks);
+        has_error = true;
     }
     if (unrecorded > 0) {
         fprintf(stderr, "Error: %u reachable blocks are NOT marked allocated in block bitmap!\n", unrecorded);
         has_error = true;
     }
 
-    free(disk_b_bitmap);
-    free(disk_i_bitmap);
-    free(reach_b_bitmap);
+    if (sb.free_blocks != sb.total_blocks - allocated ||
+        sb.free_inodes != sb.total_inodes - active_inodes - 1) {
+        fprintf(stderr, "Error: free counts disagree with allocation bitmaps.\n");
+        has_error = true;
+    }
     fclose(fp);
 
     if (has_error) {

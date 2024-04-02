@@ -3,6 +3,7 @@
 #include <kernel/string.h>
 #include <kernel/x86_64.h>
 #include <kernel/apic.h>
+#include <kernel/process.h>
 
 static idt_entry_t g_idt[IDT_ENTRIES];
 static idt_ptr_t g_idt_ptr;
@@ -98,7 +99,7 @@ void exception_dispatch(interrupt_frame_t *frame) {
         /* Check if exception occurred in user mode (Ring 3) */
         if ((frame->cs & 3) == 3) {
             kprintf("[FAULT] User mode exception in ring 3. Terminating faulting task.\n");
-            /* In P07/P08 this will kill the active process. For now, panic. */
+            process_exit(128 + (int)frame->vector);
         }
 
         panic("CPU Exception %lu: %s (err=0x%lx, rip=0x%lx)",

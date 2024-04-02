@@ -34,7 +34,11 @@ int ipv4_input(pbuf_t *p) {
     uint32_t dst_ip = ntohl(iph->dst_ip);
     uint16_t total_len = ntohs(iph->total_len);
 
-    if (p->len < total_len) {
+    netif_t *nif = net_get_default_if();
+    if (total_len < ihl || p->len < total_len || !iph->ttl ||
+        (ntohs(iph->flags_frag) & 0xBFFF) != 0 ||
+        (dst_ip != nif->ip_addr && dst_ip != 0xFFFFFFFFU &&
+         dst_ip != (nif->ip_addr | ~nif->netmask))) {
         return -STRATUM_EINVAL;
     }
 
@@ -58,7 +62,8 @@ int ipv4_input(pbuf_t *p) {
 int ipv4_output(pbuf_t *p, uint32_t dst_ip, uint8_t proto) {
     if (!p) return -STRATUM_EINVAL;
     netif_t *nif = net_get_default_if();
-    if (!nif) return -STRATUM_ENODEV;
+    if (!nif || !nif->driver_priv) return -STRATUM_ENODEV;
+    if (p->len > 1500 - sizeof(ip_hdr_t)) return -STRATUM_EMSGSIZE;
 
     size_t ip_total_len = sizeof(ip_hdr_t) + p->len;
     pbuf_t *out_p = pbuf_alloc(ip_total_len);
@@ -82,9 +87,17 @@ int ipv4_output(pbuf_t *p, uint32_t dst_ip, uint8_t proto) {
 
     /* Resolve destination MAC */
     uint8_t dst_mac[ETH_ALEN];
-    int arp_res = arp_lookup(dst_ip, dst_mac);
+    uint32_t next_hop = dst_ip;
+    if (dst_ip != 0xFFFFFFFFU && (dst_ip & nif->netmask) != (nif->ip_addr & nif->netmask)) {
+        next_hop = nif->gateway;
+        if (!next_hop) {
+            pbuf_free(out_p);
+            return -STRATUM_ENETUNREACH;
+        }
+    }
+    int arp_res = arp_lookup(next_hop, dst_mac);
     if (arp_res != 0) {
-        arp_send_request(nif, dst_ip);
+        arp_send_request(nif, next_hop);
         pbuf_free(out_p);
         return arp_res;
     }

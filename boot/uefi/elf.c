@@ -1,5 +1,9 @@
 #include "elf.h"
 
+#define KERNEL_BASE 0xFFFFFFFF80000000ULL
+#define KERNEL_WINDOW (64ULL * 1024 * 1024)
+#define PAGE_SIZE 4096ULL
+
 static void efi_memset(void *dest, int val, uint64_t count) {
     uint8_t *d = (uint8_t *)dest;
     uint8_t v = (uint8_t)val;
@@ -31,18 +35,22 @@ int elf_validate_header(const Elf64_Ehdr *ehdr, uint64_t file_size) {
         return -6; /* Not x86-64 */
     }
 
-    if (ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) {
+    if (ehdr->e_type != ET_EXEC) {
         return -7; /* Not executable */
     }
 
-    if (ehdr->e_phoff + (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr) > file_size) {
+    if (ehdr->e_version != EV_CURRENT || ehdr->e_ident[EI_VERSION] != EV_CURRENT ||
+        ehdr->e_ehsize != sizeof(*ehdr) || ehdr->e_phentsize != sizeof(Elf64_Phdr) ||
+        ehdr->e_phnum == 0 || ehdr->e_phoff < sizeof(*ehdr) ||
+        ehdr->e_phoff > file_size ||
+        (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr) > file_size - ehdr->e_phoff) {
         return -8; /* Program headers out of file bounds */
     }
 
     return 0; /* Valid */
 }
 
-EFI_STATUS elf_load_segments(EFI_BOOT_SERVICES *bs, EFI_FILE_PROTOCOL *file, const Elf64_Ehdr *ehdr, elf_loaded_image_t *out_info) {
+EFI_STATUS elf_load_segments(EFI_BOOT_SERVICES *bs, EFI_FILE_PROTOCOL *file, const Elf64_Ehdr *ehdr, uint64_t file_size, elf_loaded_image_t *out_info) {
     uint64_t phdr_table_size = (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr);
     Elf64_Phdr *phdrs = NULL;
 
@@ -65,28 +73,38 @@ EFI_STATUS elf_load_segments(EFI_BOOT_SERVICES *bs, EFI_FILE_PROTOCOL *file, con
         return EFI_LOAD_ERROR;
     }
 
-    uint64_t min_vaddr = 0xFFFFFFFFFFFFFFFFULL;
+    uint64_t min_vaddr = UINT64_MAX;
     uint64_t max_vaddr = 0;
+    int entry_found = 0;
 
     for (uint32_t i = 0; i < ehdr->e_phnum; i++) {
-        if (phdrs[i].p_type == PT_LOAD) {
-            if (phdrs[i].p_vaddr < min_vaddr) {
-                min_vaddr = phdrs[i].p_vaddr;
-            }
-            uint64_t end = phdrs[i].p_vaddr + phdrs[i].p_memsz;
-            if (end > max_vaddr) {
-                max_vaddr = end;
+        const Elf64_Phdr *ph = &phdrs[i];
+        if (ph->p_type == PT_INTERP || ph->p_type == PT_DYNAMIC) goto invalid;
+        if (ph->p_type != PT_LOAD) continue;
+        if (!ph->p_memsz && !ph->p_filesz) continue;
+
+        if (ph->p_vaddr < KERNEL_BASE || ph->p_vaddr >= KERNEL_BASE + KERNEL_WINDOW ||
+            ph->p_memsz > KERNEL_BASE + KERNEL_WINDOW - ph->p_vaddr ||
+            ph->p_filesz > ph->p_memsz || ph->p_offset > file_size ||
+            ph->p_filesz > file_size - ph->p_offset ||
+            (ph->p_flags & (PF_W | PF_X)) == (PF_W | PF_X)) goto invalid;
+
+        uint64_t end = ph->p_vaddr + ph->p_memsz;
+        for (uint32_t j = 0; j < i; j++) {
+            const Elf64_Phdr *other = &phdrs[j];
+            if (other->p_type == PT_LOAD && other->p_memsz &&
+                ph->p_vaddr < other->p_vaddr + other->p_memsz && other->p_vaddr < end) {
+                goto invalid;
             }
         }
+        if (ph->p_vaddr < min_vaddr) min_vaddr = ph->p_vaddr;
+        if (end > max_vaddr) max_vaddr = end;
+        if ((ph->p_flags & PF_X) && ehdr->e_entry >= ph->p_vaddr &&
+            ehdr->e_entry - ph->p_vaddr < ph->p_filesz) entry_found = 1;
     }
 
-    if (min_vaddr >= max_vaddr) {
-        bs->FreePool(phdrs);
-        return EFI_LOAD_ERROR;
-    }
-
-    uint64_t total_span = max_vaddr - min_vaddr;
-    uint64_t page_count = (total_span + 0xFFF) / 0x1000;
+    if (!entry_found || min_vaddr != KERNEL_BASE) goto invalid;
+    uint64_t page_count = (max_vaddr - min_vaddr + PAGE_SIZE - 1) / PAGE_SIZE;
 
     uint64_t phys_base = 0;
     status = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, page_count, &phys_base);
@@ -135,4 +153,7 @@ EFI_STATUS elf_load_segments(EFI_BOOT_SERVICES *bs, EFI_FILE_PROTOCOL *file, con
     out_info->entry_point = ehdr->e_entry;
 
     return EFI_SUCCESS;
+invalid:
+    bs->FreePool(phdrs);
+    return EFI_LOAD_ERROR;
 }

@@ -2,27 +2,39 @@ name: Stratum CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
+      - uses: actions/checkout@v4
+      - name: Install build and VM dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld nasm qemu-system-x86 ovmf mtools python3
-
-      - name: Run Doctor Check
-        run: python3 scripts/doctor.py || true
-
-      - name: Run Scope Accounting Check
-        run: python3 scripts/scope_check.py
-
-      - name: Run Documentation and Link Check
-        run: python3 scripts/check_docs.py
+          sudo apt-get install -y clang lld libclang-rt-dev nasm qemu-system-x86 ovmf mtools
+      - name: Check toolchain and documentation
+        run: make doctor docs
+      - name: Run sanitizer-enabled host tests
+        run: make test fuzz
+      - name: Build and exercise QEMU guests
+        run: |
+          make -j2 smoke
+          make -j2 test-boot
+          python3 scripts/test_diagnostics.py all
+      - name: Preserve guest transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stratum-guest-transcripts
+          path: |
+            build/**/*.log
+            build/replication/*.pcap
+          if-no-files-found: ignore

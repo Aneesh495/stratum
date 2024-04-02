@@ -1,5 +1,6 @@
 #include <kernel/vmm.h>
 #include <kernel/pmm.h>
+#include <kernel/process.h>
 #include <kernel/kernel.h>
 #include <kernel/string.h>
 #include <kernel/x86_64.h>
@@ -181,7 +182,11 @@ pml4_t *vmm_clone_address_space(pml4_t *src) {
                                      ((uint64_t)pdpt_i << 30) |
                                      ((uint64_t)pd_i << 21)   |
                                      ((uint64_t)pt_i << 12);
-                    vmm_map_page(dst, vaddr, paddr, flags);
+                    if (vmm_map_page(dst, vaddr, paddr, flags) != 0) {
+                        pmm_page_release(paddr);
+                        vmm_destroy_address_space(dst);
+                        return NULL;
+                    }
                 }
             }
         }
@@ -267,7 +272,8 @@ void vmm_page_fault_handler(interrupt_frame_t *frame) {
                     /* Shared page: allocate new physical page, copy data, remap */
                     uint64_t new_paddr = pmm_alloc_page();
                     if (!new_paddr) {
-                        panic("COW fault handler failed to allocate physical page!");
+                        if (is_user) process_exit(128 + 14);
+                        goto usercopy_fixup;
                     }
 
                     memcpy(phys_to_virt(new_paddr), phys_to_virt(paddr), PAGE_SIZE);
@@ -283,17 +289,9 @@ void vmm_page_fault_handler(interrupt_frame_t *frame) {
         }
     }
 
-    /* Check for demand paging (unmapped page access in valid user range) */
-    if (!is_present && is_user && fault_addr >= 0x400000 && fault_addr < 0x7FFFFFFFF000ULL) {
-        uint64_t cr3 = read_cr3();
-        pml4_t *curr_pml4 = (pml4_t *)phys_to_virt(cr3);
-        uint64_t new_page = pmm_alloc_page();
-        if (new_page) {
-            vmm_map_page(curr_pml4, fault_addr & ~0xFFFULL, new_page, PTE_USER | PTE_WRITABLE);
-            return;
-        }
-    }
-
+    /* No user mapping exists without an explicit region or an ELF segment. */
+usercopy_fixup:
+    ;
     /* Check for safe usercopy fault (EFAULT recovery) */
     extern uint8_t __usercopy_start[];
     extern uint8_t __usercopy_end[];
@@ -310,6 +308,7 @@ void vmm_page_fault_handler(interrupt_frame_t *frame) {
             is_user ? "User space (Ring 3)" : "Kernel space (Ring 0)",
             frame->rip);
 
+    if (is_user) process_exit(128 + 14);
     dump_interrupt_frame(frame);
     panic("Unhandled page fault (CR2=0x%016lx, RIP=0x%016lx)", fault_addr, frame->rip);
 }
@@ -382,6 +381,7 @@ void vmm_init(const boot_handoff_t *handoff) {
 
     /* 5. Switch CR3 to the permanent kernel PML4 */
     write_cr3(pml4_phys);
+    write_cr0(read_cr0() | CR0_WP);
 
     /* 6. Register Page Fault exception handler (vector 14) */
     register_interrupt_handler(14, vmm_page_fault_handler);

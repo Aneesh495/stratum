@@ -32,6 +32,7 @@ typedef struct virtio_net_hdr {
     uint16_t gso_size;
     uint16_t csum_start;
     uint16_t csum_offset;
+    uint16_t num_buffers;
 } __attribute__((packed)) virtio_net_hdr_t;
 
 typedef struct virtio_net_rx_buf {
@@ -49,6 +50,7 @@ typedef struct virtio_net_dev {
     virtio_net_rx_buf_t  *rx_pool[VIRTIO_NET_RX_BUFFERS];
     spinlock_t            rx_lock;
     spinlock_t            tx_lock;
+    bool                  tx_failed;
 } virtio_net_dev_t;
 
 int               virtio_net_init(void);

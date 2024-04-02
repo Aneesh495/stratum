@@ -1,13 +1,4 @@
-/*
- * tests/guest/stress.c - Real Guest Multi-threaded Stress and Soak Workload (K60).
- *
- * Implements continuous multi-threaded soak cycles under heavy concurrent load:
- * - Real StrataFS filesystem churn (create, write, checksum, unlink) on /strata/soak/
- * - Anonymous IPC pipe streaming between concurrent worker tasks
- * - Cryptographic SHA-256 rounds across all online CPU cores
- * - Continuous durable ledger transaction forging and fsync persistence
- * - Heap and PMM physical memory tracking verifying flat footprint and zero leaks
- */
+/* Short guest smoke workload for filesystem, pipes, hashing and local ledger. */
 
 #include <kernel/kernel.h>
 #include <kernel/types.h>
@@ -68,8 +59,7 @@ static int soak_test_fs_churn(uint32_t cycle) {
     }
 
     /* Unlink file */
-    vfs_unlink(path);
-    return 0;
+    return vfs_unlink(path);
 }
 
 static int soak_test_pipe_stream(void) {
@@ -117,11 +107,9 @@ static int soak_test_crypto_hash(uint32_t cycle) {
 }
 
 int soak_stress_run(uint32_t cycles) {
-    kprintf("[SOAK] Starting Real Guest Multi-threaded Stress and Soak Workload (K60)...\n");
+    kprintf("[SOAK] Starting bounded guest stress workload.\n");
     kprintf("[SOAK] Target configuration: %u vCPUs online, active I/O, IPC, and ledger.\n",
             smp_get_online_cpus());
-
-    vfs_mkdir("/strata/soak", 0755);
 
     uint64_t initial_free_pages = pmm_get_free_pages();
 
@@ -139,13 +127,12 @@ int soak_stress_run(uint32_t cycles) {
         kassert(hash_res == 0);
 
         /* 4. Distributed durable ledger transactions */
-        ledger_submit_tx(8000 + c, 9000 + c, 50 * c, "soak_tx", 7);
+        kassert(ledger_submit_tx(8000 + c, 9000 + c, 50 * c, "soak_tx", 7) == 0);
         ledger_block_t blk;
         int b_res = ledger_create_block(timer_get_uptime_ms(), &blk);
-        if (b_res == 0) {
-            ledger_append_block(&blk);
-            ledger_persist();
-        }
+        kassert(b_res == 0);
+        kassert(ledger_append_block(&blk) == 0);
+        kassert(ledger_persist() == 0);
 
         /* 5. Memory footprint verification */
         uint64_t cur_free_pages = pmm_get_free_pages();
@@ -161,8 +148,7 @@ int soak_stress_run(uint32_t cycles) {
     if (diff < 0) diff = -diff;
     kassert(diff <= 16);
 
-    kprintf("[SOAK] All %u stress cycles completed with zero panics and flat memory footprint (diff=%ld pages).\n",
+    kprintf("[SOAK] Completed %u cycles. Free-page difference: %ld pages.\n",
             cycles, diff);
-    kprintf("[SOAK] Real Guest Stress and Soak verified successfully (Gate A10 passed).\n");
     return 0;
 }

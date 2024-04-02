@@ -41,8 +41,6 @@ typedef enum tcp_state {
     TCP_STATE_TIME_WAIT
 } tcp_state_t;
 
-struct socket;
-
 typedef struct tcp_pcb {
     uint32_t          local_ip;
     uint16_t          local_port;
@@ -54,7 +52,6 @@ typedef struct tcp_pcb {
     uint32_t          snd_nxt;
     uint32_t          snd_wnd;
     uint32_t          rcv_nxt;
-    uint32_t          rcv_wnd;
 
     /* Receive stream ring buffer */
     uint8_t           rx_buf[TCP_RING_BUF_SIZE];
@@ -62,28 +59,32 @@ typedef struct tcp_pcb {
     uint32_t          rx_tail;
     uint32_t          rx_count;
 
-    /* Accept backlog queue for listening sockets */
-    struct tcp_pcb   *backlog_head;
-    struct tcp_pcb   *backlog_next;
+    /* One bounded retransmission slot per stream. */
+    uint8_t           tx_data[TCP_DEFAULT_MSS];
+    uint16_t          tx_len;
+    uint8_t           tx_flags;
+    unsigned          retries;
+    uint64_t          retry_at;
+
+    struct tcp_pcb   *listener;
     int               backlog_capacity;
     int               backlog_count;
-
-    struct socket    *sock;
     struct tcp_pcb   *next;
-    spinlock_t        lock;
 } tcp_pcb_t;
 
 void tcp_init(void);
 int  tcp_input(pbuf_t *p, uint32_t src_ip, uint32_t dst_ip);
-int  tcp_send_segment(tcp_pcb_t *pcb, uint8_t flags, const void *data, size_t len);
+void tcp_tick(void);
 
-tcp_pcb_t *tcp_new(struct socket *sock);
+tcp_pcb_t *tcp_new(void);
 int        tcp_bind(tcp_pcb_t *pcb, uint16_t port);
 int        tcp_listen(tcp_pcb_t *pcb, int backlog);
 tcp_pcb_t *tcp_accept(tcp_pcb_t *pcb);
 int        tcp_connect(tcp_pcb_t *pcb, uint32_t remote_ip, uint16_t remote_port);
 int64_t    tcp_send(tcp_pcb_t *pcb, const void *data, size_t len);
 int64_t    tcp_recv(tcp_pcb_t *pcb, void *buf, size_t len);
+int        tcp_poll(tcp_pcb_t *pcb, uint32_t events);
+int        tcp_shutdown(tcp_pcb_t *pcb);
 int        tcp_close(tcp_pcb_t *pcb);
 
 #endif /* STRATUM_KERNEL_TCP_H */

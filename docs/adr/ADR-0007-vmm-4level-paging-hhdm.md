@@ -1,5 +1,7 @@
 # ADR-0007: Virtual Memory 4-Level Paging and Higher-Half Direct Map
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

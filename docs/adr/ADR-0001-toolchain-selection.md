@@ -1,5 +1,7 @@
 # ADR-0001: Pinned LLVM Toolchain Selection
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

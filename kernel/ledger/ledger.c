@@ -256,17 +256,18 @@ int ledger_persist(void) {
         memcpy(hdr.latest_hash, g_ledger.chain[g_ledger.chain_height - 1].block_hash, SHA256_DIGEST_SIZE);
     }
 
-    vfs_write(file, &hdr, sizeof(hdr));
-
-    for (uint64_t i = 0; i < g_ledger.chain_height; i++) {
-        vfs_write(file, &g_ledger.chain[i], sizeof(ledger_block_t));
+    if (vfs_write(file, &hdr, sizeof(hdr)) != sizeof(hdr)) res = -STRATUM_EIO;
+    for (uint64_t i = 0; res == 0 && i < g_ledger.chain_height; i++) {
+        if (vfs_write(file, &g_ledger.chain[i], sizeof(ledger_block_t)) != sizeof(ledger_block_t)) {
+            res = -STRATUM_EIO;
+        }
     }
 
     vfs_close(file);
-    vfs_sync();
+    if (res == 0) res = vfs_sync();
 
     spin_unlock_irqrestore(&g_ledger.lock, flags);
-    return 0;
+    return res;
 }
 
 int ledger_recover(void) {

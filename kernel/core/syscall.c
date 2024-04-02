@@ -115,7 +115,7 @@ static int64_t sys_write_impl(int fd, const void *u_buf, size_t count) {
         size_t chunk = (count - written > sizeof(kbuf)) ? sizeof(kbuf) : (count - written);
         if (copy_from_user(kbuf, src + written, chunk) != 0) {
             file_close(f);
-            return -STRATUM_EFAULT;
+            return written ? (int64_t)written : -STRATUM_EFAULT;
         }
 
         int64_t res = f->ops->write(f, kbuf, chunk);
@@ -134,7 +134,7 @@ static int64_t sys_write_impl(int fd, const void *u_buf, size_t count) {
 static int copy_str_from_user(char *dst_k, const char *src_u, size_t max_len) {
     if (!dst_k || !src_u || max_len == 0) return -STRATUM_EINVAL;
     size_t i = 0;
-    while (i < max_len - 1) {
+    while (i < max_len) {
         char c;
         if (copy_from_user(&c, src_u + i, 1) != 0) {
             return -STRATUM_EFAULT;
@@ -145,17 +145,15 @@ static int copy_str_from_user(char *dst_k, const char *src_u, size_t max_len) {
         }
         i++;
     }
-    dst_k[max_len - 1] = '\0';
-    return 0;
+    return -STRATUM_ENAMETOOLONG;
 }
 
 static int64_t sys_open_impl(const char *u_path, int flags, int mode) {
     if (!u_path) return -STRATUM_EINVAL;
     char kpath[VFS_MAX_PATH];
     memset(kpath, 0, sizeof(kpath));
-    if (copy_str_from_user(kpath, u_path, sizeof(kpath)) != 0) {
-        return -STRATUM_EFAULT;
-    }
+    int path_result = copy_str_from_user(kpath, u_path, sizeof(kpath));
+    if (path_result != 0) return path_result;
 
     process_t *proc = process_get_current();
     if (!proc) return -STRATUM_ESRCH;
@@ -186,9 +184,8 @@ static int64_t sys_stat_impl(const char *u_path, vfs_stat_t *u_st) {
     if (!u_path || !u_st) return -STRATUM_EINVAL;
     char kpath[VFS_MAX_PATH];
     memset(kpath, 0, sizeof(kpath));
-    if (copy_str_from_user(kpath, u_path, sizeof(kpath)) != 0) {
-        return -STRATUM_EFAULT;
-    }
+    int path_result = copy_str_from_user(kpath, u_path, sizeof(kpath));
+    if (path_result != 0) return path_result;
     vfs_stat_t kst;
     int res = vfs_stat(kpath, &kst);
     if (res != 0) return res;
@@ -202,9 +199,8 @@ static int64_t sys_mkdir_impl(const char *u_path, int mode) {
     if (!u_path) return -STRATUM_EINVAL;
     char kpath[VFS_MAX_PATH];
     memset(kpath, 0, sizeof(kpath));
-    if (copy_str_from_user(kpath, u_path, sizeof(kpath)) != 0) {
-        return -STRATUM_EFAULT;
-    }
+    int path_result = copy_str_from_user(kpath, u_path, sizeof(kpath));
+    if (path_result != 0) return path_result;
     return vfs_mkdir(kpath, mode);
 }
 
@@ -212,9 +208,8 @@ static int64_t sys_unlink_impl(const char *u_path) {
     if (!u_path) return -STRATUM_EINVAL;
     char kpath[VFS_MAX_PATH];
     memset(kpath, 0, sizeof(kpath));
-    if (copy_str_from_user(kpath, u_path, sizeof(kpath)) != 0) {
-        return -STRATUM_EFAULT;
-    }
+    int path_result = copy_str_from_user(kpath, u_path, sizeof(kpath));
+    if (path_result != 0) return path_result;
     return vfs_unlink(kpath);
 }
 
@@ -223,7 +218,7 @@ static int64_t sys_fsync_impl(int fd) {
     if (!proc) return -STRATUM_ESRCH;
     file_t *f = fd_get(&proc->fds, fd);
     if (!f) return -STRATUM_EBADF;
-    int res = 0;
+    int res = -STRATUM_EINVAL;
     if (f->type == FILE_TYPE_VFS && f->priv) {
         vfs_node_t *node = (vfs_node_t *)f->priv;
         if (node->ops && node->ops->sync) {
@@ -242,13 +237,20 @@ static int64_t sys_bind_user(int fd, const struct sockaddr *u_addr, uint32_t add
 }
 
 static int64_t sys_accept_user(int fd, struct sockaddr *u_addr, uint32_t *u_addrlen) {
-    char kaddr[128];
-    uint32_t klen = sizeof(kaddr);
-    int cfd = sys_accept(fd, (struct sockaddr *)kaddr, &klen);
+    if (!u_addr) return sys_accept(fd, NULL, NULL);
+    uint32_t supplied;
+    if (!u_addrlen || copy_from_user(&supplied, u_addrlen, sizeof(supplied)) != 0) {
+        return -STRATUM_EFAULT;
+    }
+    struct sockaddr_in peer;
+    uint32_t actual = sizeof(peer);
+    int cfd = sys_accept(fd, (struct sockaddr *)&peer, &actual);
     if (cfd < 0) return cfd;
-    if (u_addr && u_addrlen) {
-        copy_to_user(u_addr, kaddr, klen);
-        copy_to_user(u_addrlen, &klen, sizeof(uint32_t));
+    size_t n = supplied < actual ? supplied : actual;
+    if (copy_to_user(u_addr, &peer, n) != 0 ||
+        copy_to_user(u_addrlen, &actual, sizeof(actual)) != 0) {
+        socket_close_fd(cfd);
+        return -STRATUM_EFAULT;
     }
     return cfd;
 }
@@ -262,27 +264,21 @@ static int64_t sys_connect_user(int fd, const struct sockaddr *u_addr, uint32_t 
 
 static int64_t sys_send_user(int fd, const void *u_buf, size_t len, int flags) {
     if (!is_user_range_valid(u_buf, len)) return -STRATUM_EFAULT;
-    char kbuf[512];
-    size_t sent = 0;
-    while (sent < len) {
-        size_t chunk = (len - sent > sizeof(kbuf)) ? sizeof(kbuf) : (len - sent);
-        if (copy_from_user(kbuf, (const char *)u_buf + sent, chunk) != 0) return -STRATUM_EFAULT;
-        int64_t res = sys_send(fd, kbuf, chunk, flags);
-        if (res < 0) return (sent > 0) ? (int64_t)sent : res;
-        sent += (size_t)res;
-        if ((size_t)res < chunk) break;
-    }
-    return (int64_t)sent;
+    int type = socket_fd_type(fd);
+    if (type < 0) return type;
+    char kbuf[UDP_MAX_PAYLOAD];
+    if (type == SOCK_DGRAM && len > sizeof(kbuf)) return -STRATUM_EMSGSIZE;
+    size_t n = len < sizeof(kbuf) ? len : sizeof(kbuf);
+    if (copy_from_user(kbuf, u_buf, n) != 0) return -STRATUM_EFAULT;
+    return sys_send(fd, kbuf, n, flags);
 }
 
 static int64_t sys_recv_user(int fd, void *u_buf, size_t len, int flags) {
     if (!is_user_range_valid(u_buf, len)) return -STRATUM_EFAULT;
-    char kbuf[512];
-    size_t to_recv = (len > sizeof(kbuf)) ? sizeof(kbuf) : len;
-    int64_t res = sys_recv(fd, kbuf, to_recv, flags);
-    if (res > 0) {
-        if (copy_to_user(u_buf, kbuf, (size_t)res) != 0) return -STRATUM_EFAULT;
-    }
+    char kbuf[UDP_MAX_PAYLOAD];
+    size_t n = len < sizeof(kbuf) ? len : sizeof(kbuf);
+    int64_t res = sys_recv(fd, kbuf, n, flags);
+    if (res > 0 && copy_to_user(u_buf, kbuf, (size_t)res) != 0) return -STRATUM_EFAULT;
     return res;
 }
 
@@ -376,22 +372,10 @@ static int64_t sys_poll_impl(struct pollfd *u_fds, uint32_t nfds, int timeout_ms
             file_close(f);
         }
 
-        if (ready_count > 0) {
-            copy_to_user(u_fds, k_fds, nfds * sizeof(struct pollfd));
-            return ready_count;
-        }
-
-        if (timeout_ms == 0) {
-            copy_to_user(u_fds, k_fds, nfds * sizeof(struct pollfd));
-            return 0;
-        }
-
-        if (timeout_ms > 0) {
-            uint64_t elapsed = timer_get_uptime_ms() - start_ms;
-            if (elapsed >= (uint64_t)timeout_ms) {
-                copy_to_user(u_fds, k_fds, nfds * sizeof(struct pollfd));
-                return 0;
-            }
+        uint64_t elapsed = timer_get_uptime_ms() - start_ms;
+        if (ready_count > 0 || (timeout_ms >= 0 && elapsed >= (uint64_t)timeout_ms)) {
+            int result = copy_to_user(u_fds, k_fds, nfds * sizeof(struct pollfd));
+            return result != 0 ? result : ready_count;
         }
 
         thread_sleep_ms(2);
@@ -532,15 +516,7 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
         return sys_sysinfo_impl((strat_sysinfo_t *)regs->rdi);
     }
 
-    case SYS_thread_create:
-    case SYS_thread_exit:
-    case SYS_thread_self: {
-        thread_yield();
-        return 0;
-    }
-
     default:
-        kprintf("[SYSCALL] Unhandled syscall #%lu from RIP=0x%016lx\n", nr, regs->rip);
         return -STRATUM_ENOSYS;
     }
 }

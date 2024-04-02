@@ -1,5 +1,7 @@
 # ADR-0010: Preemptive SMP Scheduler with O(1) Priority Runqueues
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

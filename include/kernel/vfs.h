@@ -5,6 +5,7 @@
 #include <kernel/file.h>
 #include <kernel/spinlock.h>
 
+#define VFS_APPEND_OFFSET ((uint64_t)-1)
 #define VFS_MAX_PATH        256
 #define VFS_MAX_NAME        64
 #define VFS_MAX_MOUNTS      16
@@ -83,6 +84,7 @@ typedef struct vfs_node_ops {
 typedef struct vfs_node {
     char                    name[VFS_MAX_NAME];
     uint64_t                inode_num;
+    uint32_t generation;
     uint8_t                 type;
     uint32_t                mode;
     uint32_t                uid;

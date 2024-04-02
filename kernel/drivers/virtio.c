@@ -117,6 +117,10 @@ int virtio_negotiate_features(virtio_device_t *vdev, uint64_t required_features)
         uint32_t f1 = vdev->common_cfg->device_feature;
         vdev->device_features = ((uint64_t)f1 << 32) | f0;
 
+        if (!(vdev->device_features & VIRTIO_F_VERSION_1)) {
+            virtio_set_status(vdev, VIRTIO_STATUS_FAILED);
+            return -STRATUM_ENOTSUP;
+        }
         uint64_t supported = vdev->device_features & (required_features | VIRTIO_F_VERSION_1);
 
         vdev->common_cfg->driver_feature_select = 0;

@@ -13,105 +13,83 @@ virtio_blk_dev_t *virtio_blk_get_primary(void) {
     return g_primary_blk_registered ? &g_primary_blk : NULL;
 }
 
+/* One request is in flight under the device lock. Keep DMA storage alive even
+ * if the device times out and completes late. */
+static virtio_blk_req_hdr_t request_header;
+static uint8_t request_status;
+static _Alignas(PAGE_SIZE) uint8_t request_data[PAGE_SIZE];
+
+static int64_t submit_request(virtio_blk_dev_t *dev, uint32_t type, uint64_t sector,
+                              uint32_t bytes, void *buf) {
+    request_header = (virtio_blk_req_hdr_t){ .type = type, .sector = sector };
+    request_status = 0xFF;
+    if (bytes && type == VIRTIO_BLK_T_OUT) memcpy(request_data, buf, bytes);
+
+    vring_buf_t buffers[3] = {
+        { .phys_addr = virt_to_phys(&request_header), .len = sizeof(request_header) },
+    };
+    unsigned out = 1, in = 0;
+    if (bytes) {
+        buffers[1] = (vring_buf_t){
+            .phys_addr = virt_to_phys(request_data), .len = bytes, .is_write = type == VIRTIO_BLK_T_IN,
+        };
+        if (type == VIRTIO_BLK_T_IN) in++;
+        else out++;
+    }
+    buffers[out + in] = (vring_buf_t){
+        .phys_addr = virt_to_phys(&request_status), .len = 1, .is_write = true,
+    };
+    in++;
+    int res = virtqueue_add_buf(dev->vq, buffers, out, in, &request_header);
+    if (res != 0) return res;
+    virtqueue_kick(dev->vq);
+
+    for (uint64_t attempts = 0; attempts < 10000000ULL; attempts++) {
+        uint32_t used;
+        void *complete = virtqueue_get_buf(dev->vq, &used);
+        if (complete) {
+            if (complete != &request_header || request_status != VIRTIO_BLK_S_OK ||
+                used != (type == VIRTIO_BLK_T_IN ? bytes + 1 : 1)) return -STRATUM_EIO;
+            if (bytes && type == VIRTIO_BLK_T_IN) memcpy(buf, request_data, bytes);
+            return bytes;
+        }
+        cpu_pause();
+    }
+    dev->failed = true;
+    kprintf("[VIRTIO-BLK] Device disabled after a timeout at sector %lu.\n", sector);
+    return -STRATUM_ETIMEDOUT;
+}
+
 static int64_t virtio_blk_do_request(virtio_blk_dev_t *dev, uint32_t type,
                                      uint64_t sector, uint32_t count, void *buf) {
     if (!dev || !dev->vq) return -STRATUM_EINVAL;
-    if (count == 0 && type != VIRTIO_BLK_T_FLUSH) return 0;
+    if (type != VIRTIO_BLK_T_FLUSH) {
+        if (!count) return 0;
+        if (!buf || sector >= dev->capacity_sectors || count > dev->capacity_sectors - sector) {
+            return -STRATUM_EINVAL;
+        }
+    }
 
     uint64_t flags;
     spin_lock_irqsave(&dev->lock, &flags);
-
-    /* Allocate request header and status byte on heap */
-    virtio_blk_req_hdr_t *hdr = (virtio_blk_req_hdr_t *)kmalloc(sizeof(virtio_blk_req_hdr_t));
-    if (!hdr) {
+    if (dev->failed) {
         spin_unlock_irqrestore(&dev->lock, flags);
-        return -STRATUM_ENOMEM;
-    }
-
-    uint8_t *status = (uint8_t *)kmalloc(1);
-    if (!status) {
-        kfree(hdr);
-        spin_unlock_irqrestore(&dev->lock, flags);
-        return -STRATUM_ENOMEM;
-    }
-
-    hdr->type = type;
-    hdr->reserved = 0;
-    hdr->sector = sector;
-    *status = 0xFF; /* Sentinel */
-
-    vring_buf_t bufs[3];
-    uint32_t num_out = 0;
-    uint32_t num_in = 0;
-
-    /* Buffer 0: Header (device-readable) */
-    bufs[0].phys_addr = virt_to_phys(hdr);
-    bufs[0].len = sizeof(virtio_blk_req_hdr_t);
-    bufs[0].is_write = false;
-    num_out++;
-
-    /* Buffer 1: Data payload */
-    if (count > 0 && buf != NULL) {
-        bufs[1].phys_addr = virt_to_phys(buf);
-        bufs[1].len = count * VIRTIO_BLK_SECTOR_SIZE;
-        if (type == VIRTIO_BLK_T_IN) {
-            bufs[1].is_write = true;
-            num_in++;
-        } else {
-            bufs[1].is_write = false;
-            num_out++;
-        }
-    }
-
-    /* Buffer 2: Status byte (device-writable) */
-    uint32_t status_buf_idx = (count > 0 && buf != NULL) ? 2 : 1;
-    bufs[status_buf_idx].phys_addr = virt_to_phys(status);
-    bufs[status_buf_idx].len = 1;
-    bufs[status_buf_idx].is_write = true;
-    num_in++;
-
-    int res = virtqueue_add_buf(dev->vq, bufs, num_out, num_in, hdr);
-    if (res != 0) {
-        kfree(hdr);
-        kfree(status);
-        spin_unlock_irqrestore(&dev->lock, flags);
-        return res;
-    }
-
-    virtqueue_kick(dev->vq);
-
-    /* Poll for completion */
-    uint64_t timeout_iters = 10000000ULL;
-    uint32_t resp_len = 0;
-    void *completed = NULL;
-    while (timeout_iters-- > 0) {
-        completed = virtqueue_get_buf(dev->vq, &resp_len);
-        if (completed != NULL) {
-            break;
-        }
-        __asm__ volatile("pause");
-    }
-
-    if (!completed) {
-        kprintf("[VIRTIO-BLK] ERROR: Request timed out at sector %lu!\n", sector);
-        kfree(hdr);
-        kfree(status);
-        spin_unlock_irqrestore(&dev->lock, flags);
-        return -STRATUM_ETIMEDOUT;
-    }
-
-    uint8_t final_status = *status;
-    kfree(hdr);
-    kfree(status);
-
-    spin_unlock_irqrestore(&dev->lock, flags);
-
-    if (final_status != VIRTIO_BLK_S_OK) {
-        kprintf("[VIRTIO-BLK] ERROR: Device returned status %u\n", final_status);
         return -STRATUM_EIO;
     }
-
-    return (int64_t)(count * VIRTIO_BLK_SECTOR_SIZE);
+    uint64_t completed = 0;
+    int64_t result;
+    do {
+        uint32_t sectors = count > PAGE_SIZE / VIRTIO_BLK_SECTOR_SIZE
+            ? PAGE_SIZE / VIRTIO_BLK_SECTOR_SIZE : count;
+        result = submit_request(dev, type, sector, sectors * VIRTIO_BLK_SECTOR_SIZE,
+                                buf ? (uint8_t *)buf + completed : NULL);
+        if (result < 0) break;
+        completed += (uint64_t)result;
+        sector += sectors;
+        count -= sectors;
+    } while (count);
+    spin_unlock_irqrestore(&dev->lock, flags);
+    return completed ? (int64_t)completed : result;
 }
 
 int64_t virtio_blk_read(virtio_blk_dev_t *dev, uint64_t sector, uint32_t count, void *buf) {
@@ -124,6 +102,7 @@ int64_t virtio_blk_write(virtio_blk_dev_t *dev, uint64_t sector, uint32_t count,
 }
 
 int virtio_blk_flush(virtio_blk_dev_t *dev) {
+    if (!dev || !(dev->vdev.negotiated_features & VIRTIO_BLK_F_FLUSH)) return -STRATUM_ENOTSUP;
     int64_t res = virtio_blk_do_request(dev, VIRTIO_BLK_T_FLUSH, 0, 0, NULL);
     return (res >= 0) ? 0 : (int)res;
 }
@@ -150,8 +129,9 @@ int virtio_blk_init(void) {
     }
 
     /* Negotiate supported features */
-    uint64_t features = VIRTIO_BLK_F_BLK_SIZE | VIRTIO_BLK_F_FLUSH;
-    virtio_negotiate_features(&dev->vdev, features);
+    uint64_t features = VIRTIO_BLK_F_BLK_SIZE | VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_RO;
+    res = virtio_negotiate_features(&dev->vdev, features);
+    if (res != 0) return res;
 
     /* Setup request virtqueue (queue index 0) */
     dev->vq = virtio_setup_queue(&dev->vdev, 0);

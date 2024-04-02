@@ -47,6 +47,7 @@ process_t *process_find(uint32_t pid);
 process_t *process_create_init(user_program_t *prog);
 int32_t    process_fork(syscall_regs_t *regs);
 void       process_exit(int status) __attribute__((noreturn));
+void       process_finish_exit(process_t *proc);
 int32_t    process_waitpid(int32_t pid, int *status, int options);
 
 #endif /* STRATUM_KERNEL_PROCESS_H */

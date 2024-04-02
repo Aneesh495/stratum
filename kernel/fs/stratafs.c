@@ -5,6 +5,14 @@
 #include <kernel/sched.h>
 #include <shared/errno.h>
 
+#define STRATAFS_MAX_FILE_SIZE ((STRATAFS_NDIR_BLOCKS + STRATAFS_INDIR_BLOCKS) * STRATAFS_BLOCK_SIZE)
+#define STRATAFS_MAX_BITMAP_BITS (STRATAFS_BLOCK_SIZE * 8U)
+#define STRATAFS_MODE_MASK 0170000
+
+_Static_assert(sizeof(stratafs_sb_t) == STRATAFS_BLOCK_SIZE, "StrataFS superblock layout");
+_Static_assert(sizeof(stratafs_disk_inode_t) == STRATAFS_INODE_SIZE, "StrataFS inode stride");
+_Static_assert(sizeof(stratafs_disk_dirent_t) == 256, "StrataFS directory entry layout");
+
 static stratafs_t g_stratafs;
 static bool       g_stratafs_active = false;
 
@@ -13,6 +21,7 @@ extern const vfs_node_ops_t g_stratafs_node_ops;
 
 int stratafs_read_block(stratafs_t *fs, uint64_t block_num, void *buf) {
     if (!fs || !fs->dev || !buf) return -STRATUM_EINVAL;
+    if (block_num >= fs->dev->capacity_sectors / STRATAFS_SECTORS_PER_BLOCK) return -STRATUM_EIO;
     uint64_t sector = block_num * STRATAFS_SECTORS_PER_BLOCK;
     int64_t rd = virtio_blk_read(fs->dev, sector, STRATAFS_SECTORS_PER_BLOCK, buf);
     return (rd == STRATAFS_BLOCK_SIZE) ? 0 : -STRATUM_EIO;
@@ -20,6 +29,7 @@ int stratafs_read_block(stratafs_t *fs, uint64_t block_num, void *buf) {
 
 int stratafs_write_block(stratafs_t *fs, uint64_t block_num, const void *buf) {
     if (!fs || !fs->dev || !buf) return -STRATUM_EINVAL;
+    if (block_num >= fs->dev->capacity_sectors / STRATAFS_SECTORS_PER_BLOCK) return -STRATUM_EIO;
     uint64_t sector = block_num * STRATAFS_SECTORS_PER_BLOCK;
     int64_t wr = virtio_blk_write(fs->dev, sector, STRATAFS_SECTORS_PER_BLOCK, buf);
     return (wr == STRATAFS_BLOCK_SIZE) ? 0 : -STRATUM_EIO;
@@ -32,14 +42,22 @@ static inline int stratafs_read_block_tx(stratafs_t *fs, journal_tx_t *tx, uint6
     return stratafs_read_block(fs, block_num, buf);
 }
 
+static uint32_t superblock_checksum(stratafs_sb_t *sb) {
+    uint32_t saved = sb->checksum;
+    sb->checksum = 0;
+    uint32_t crc = journal_crc32(sb, offsetof(stratafs_sb_t, checksum) + sizeof(sb->checksum));
+    sb->checksum = saved;
+    return crc;
+}
+
 int stratafs_format(virtio_blk_dev_t *dev) {
     if (!dev) return -STRATUM_EINVAL;
 
     kprintf("[STRATAFS] Formatting storage device with StrataFS layout...\n");
 
     uint64_t total_blocks = dev->capacity_sectors / STRATAFS_SECTORS_PER_BLOCK;
-    if (total_blocks < 1024) {
-        kprintf("[STRATAFS] Device too small for StrataFS (%lu blocks)\n", total_blocks);
+    if (total_blocks < 1024 || total_blocks > STRATAFS_MAX_BITMAP_BITS) {
+        kprintf("[STRATAFS] Unsupported device size for StrataFS (%lu blocks)\n", total_blocks);
         return -STRATUM_ENOSPC;
     }
 
@@ -93,7 +111,7 @@ int stratafs_format(virtio_blk_dev_t *dev) {
     sb->free_blocks--;
 
     uint64_t bbm_sec = sb->block_bitmap_block * STRATAFS_SECTORS_PER_BLOCK;
-    virtio_blk_write(dev, bbm_sec, STRATAFS_SECTORS_PER_BLOCK, bitmap);
+    if (virtio_blk_write(dev, bbm_sec, STRATAFS_SECTORS_PER_BLOCK, bitmap) != STRATAFS_BLOCK_SIZE) goto io_error;
 
     /* 4. Initialize Inode Bitmap (mark inode 0 reserved, inode 1 root directory) */
     memset(bitmap, 0, STRATAFS_BLOCK_SIZE);
@@ -101,14 +119,14 @@ int stratafs_format(virtio_blk_dev_t *dev) {
     sb->free_inodes -= 2;
 
     uint64_t ibm_sec = sb->inode_bitmap_block * STRATAFS_SECTORS_PER_BLOCK;
-    virtio_blk_write(dev, ibm_sec, STRATAFS_SECTORS_PER_BLOCK, bitmap);
+    if (virtio_blk_write(dev, ibm_sec, STRATAFS_SECTORS_PER_BLOCK, bitmap) != STRATAFS_BLOCK_SIZE) goto io_error;
 
     /* 5. Initialize Inode Table */
-    uint8_t *zero_block = (uint8_t *)kmalloc(STRATAFS_BLOCK_SIZE);
+    uint8_t *zero_block = bitmap;
     memset(zero_block, 0, STRATAFS_BLOCK_SIZE);
     for (uint32_t i = 0; i < sb->inode_table_blocks; i++) {
         uint64_t it_sec = (sb->inode_table_block + i) * STRATAFS_SECTORS_PER_BLOCK;
-        virtio_blk_write(dev, it_sec, STRATAFS_SECTORS_PER_BLOCK, zero_block);
+        if (virtio_blk_write(dev, it_sec, STRATAFS_SECTORS_PER_BLOCK, zero_block) != STRATAFS_BLOCK_SIZE) goto io_error;
     }
 
     /* Write Root Inode (Inode 1) into Inode Table Block 4 */
@@ -116,6 +134,7 @@ int stratafs_format(virtio_blk_dev_t *dev) {
     memset(&root_inode, 0, sizeof(stratafs_disk_inode_t));
     root_inode.mode = VFS_MODE_IFDIR | 0755;
     root_inode.nlink = 2;
+    root_inode.generation = 1;
     root_inode.size = STRATAFS_BLOCK_SIZE;
     root_inode.blocks = STRATAFS_SECTORS_PER_BLOCK;
     root_inode.direct[0] = sb->data_start_block;
@@ -137,27 +156,31 @@ int stratafs_format(virtio_blk_dev_t *dev) {
     strcpy(dotdot->name, "..");
 
     uint64_t root_data_sec = sb->data_start_block * STRATAFS_SECTORS_PER_BLOCK;
-    virtio_blk_write(dev, root_data_sec, STRATAFS_SECTORS_PER_BLOCK, zero_block);
+    if (virtio_blk_write(dev, root_data_sec, STRATAFS_SECTORS_PER_BLOCK, zero_block) != STRATAFS_BLOCK_SIZE) goto io_error;
 
     /* Write root inode to first inode table block */
     uint64_t it0_sec = sb->inode_table_block * STRATAFS_SECTORS_PER_BLOCK;
-    virtio_blk_read(dev, it0_sec, STRATAFS_SECTORS_PER_BLOCK, zero_block);
+    memset(zero_block, 0, STRATAFS_BLOCK_SIZE);
     memcpy(zero_block + sizeof(stratafs_disk_inode_t), &root_inode, sizeof(stratafs_disk_inode_t));
-    virtio_blk_write(dev, it0_sec, STRATAFS_SECTORS_PER_BLOCK, zero_block);
+    if (virtio_blk_write(dev, it0_sec, STRATAFS_SECTORS_PER_BLOCK, zero_block) != STRATAFS_BLOCK_SIZE) goto io_error;
 
     /* 6. Write Superblock */
-    sb->checksum = journal_crc32(sb, sizeof(stratafs_sb_t) - 4008);
+    sb->checksum = superblock_checksum(sb);
     uint64_t sb_sec = 1 * STRATAFS_SECTORS_PER_BLOCK;
-    virtio_blk_write(dev, sb_sec, STRATAFS_SECTORS_PER_BLOCK, sb);
-    virtio_blk_flush(dev);
+    if (virtio_blk_flush(dev) != 0 ||
+        virtio_blk_write(dev, sb_sec, STRATAFS_SECTORS_PER_BLOCK, sb) != STRATAFS_BLOCK_SIZE ||
+        virtio_blk_flush(dev) != 0) goto io_error;
 
     kfree(sb);
     kfree(bitmap);
-    kfree(zero_block);
 
     kprintf("[STRATAFS] Format complete: %lu total blocks, %lu free data blocks, 2048 inodes.\n",
             total_blocks, total_blocks - 581);
     return 0;
+io_error:
+    kfree(bitmap);
+    kfree(sb);
+    return -STRATUM_EIO;
 }
 
 int stratafs_alloc_block(stratafs_t *fs, journal_tx_t *tx, uint32_t *out_block) {
@@ -178,13 +201,12 @@ int stratafs_alloc_block(stratafs_t *fs, journal_tx_t *tx, uint32_t *out_block) 
     for (uint32_t b = start; b < limit; b++) {
         if (!(bitmap[b / 8] & (1 << (b % 8)))) {
             bitmap[b / 8] |= (uint8_t)(1 << (b % 8));
-            fs->sb.free_blocks--;
 
-            journal_write_block(tx, fs->sb.block_bitmap_block, bitmap);
+            res = journal_write_block(tx, fs->sb.block_bitmap_block, bitmap);
 
             *out_block = b;
             kfree(bitmap);
-            return 0;
+            return res;
         }
     }
 
@@ -206,12 +228,15 @@ int stratafs_free_block(stratafs_t *fs, journal_tx_t *tx, uint32_t block) {
         return res;
     }
 
+    if (!(bitmap[block / 8] & (1 << (block % 8)))) {
+        kfree(bitmap);
+        return -STRATUM_EIO;
+    }
     bitmap[block / 8] &= (uint8_t)~(1 << (block % 8));
-    fs->sb.free_blocks++;
 
-    journal_write_block(tx, fs->sb.block_bitmap_block, bitmap);
+    res = journal_write_block(tx, fs->sb.block_bitmap_block, bitmap);
     kfree(bitmap);
-    return 0;
+    return res;
 }
 
 int stratafs_alloc_inode(stratafs_t *fs, journal_tx_t *tx, uint16_t mode, uint32_t *out_ino) {
@@ -229,28 +254,32 @@ int stratafs_alloc_inode(stratafs_t *fs, journal_tx_t *tx, uint16_t mode, uint32
     for (uint32_t ino = 1; ino < fs->sb.total_inodes; ino++) {
         if (!(bitmap[ino / 8] & (1 << (ino % 8)))) {
             bitmap[ino / 8] |= (uint8_t)(1 << (ino % 8));
-            fs->sb.free_inodes--;
 
-            journal_write_block(tx, fs->sb.inode_bitmap_block, bitmap);
+            res = journal_write_block(tx, fs->sb.inode_bitmap_block, bitmap);
+            if (res != 0) break;
 
             stratafs_disk_inode_t dinode;
-            memset(&dinode, 0, sizeof(stratafs_disk_inode_t));
+            res = stratafs_read_inode(fs, ino, &dinode);
+            if (res != 0) break;
+            uint32_t generation = dinode.generation + 1;
+            memset(&dinode, 0, sizeof(dinode));
+            dinode.generation = generation;
             dinode.mode = mode;
             dinode.nlink = (mode & VFS_MODE_IFDIR) ? 2 : 1;
             dinode.atime = timer_get_uptime_ms();
             dinode.mtime = dinode.atime;
             dinode.ctime = dinode.atime;
 
-            stratafs_write_inode(fs, tx, ino, &dinode);
+            res = stratafs_write_inode(fs, tx, ino, &dinode);
 
             *out_ino = ino;
             kfree(bitmap);
-            return 0;
+            return res;
         }
     }
 
     kfree(bitmap);
-    return -STRATUM_ENOSPC;
+    return res ? res : -STRATUM_ENOSPC;
 }
 
 int stratafs_free_inode(stratafs_t *fs, journal_tx_t *tx, uint32_t ino) {
@@ -266,19 +295,19 @@ int stratafs_free_inode(stratafs_t *fs, journal_tx_t *tx, uint32_t ino) {
     }
 
     bitmap[ino / 8] &= (uint8_t)~(1 << (ino % 8));
-    fs->sb.free_inodes++;
 
-    journal_write_block(tx, fs->sb.inode_bitmap_block, bitmap);
-
-    stratafs_disk_inode_t zero_inode;
-    memset(&zero_inode, 0, sizeof(stratafs_disk_inode_t));
-    stratafs_write_inode(fs, tx, ino, &zero_inode);
-
+    res = journal_write_block(tx, fs->sb.inode_bitmap_block, bitmap);
     kfree(bitmap);
-    return 0;
+    if (res != 0) return res;
+
+    stratafs_disk_inode_t old;
+    res = stratafs_read_inode(fs, ino, &old);
+    if (res != 0) return res;
+    stratafs_disk_inode_t empty = { .generation = old.generation };
+    return stratafs_write_inode(fs, tx, ino, &empty);
 }
 
-int stratafs_read_inode(stratafs_t *fs, uint32_t ino, stratafs_disk_inode_t *out_inode) {
+static int read_inode(stratafs_t *fs, journal_tx_t *tx, uint32_t ino, stratafs_disk_inode_t *out_inode) {
     if (!fs || ino >= fs->sb.total_inodes || !out_inode) return -STRATUM_EINVAL;
 
     uint32_t block_idx = fs->sb.inode_table_block + (ino / STRATAFS_INODES_PER_BLOCK);
@@ -287,12 +316,16 @@ int stratafs_read_inode(stratafs_t *fs, uint32_t ino, stratafs_disk_inode_t *out
     uint8_t *buf = (uint8_t *)kmalloc(STRATAFS_BLOCK_SIZE);
     if (!buf) return -STRATUM_ENOMEM;
 
-    int res = stratafs_read_block(fs, block_idx, buf);
+    int res = stratafs_read_block_tx(fs, tx, block_idx, buf);
     if (res == 0) {
         memcpy(out_inode, buf + offset, sizeof(stratafs_disk_inode_t));
     }
     kfree(buf);
     return res;
+}
+
+int stratafs_read_inode(stratafs_t *fs, uint32_t ino, stratafs_disk_inode_t *out_inode) {
+    return read_inode(fs, NULL, ino, out_inode);
 }
 
 int stratafs_write_inode(stratafs_t *fs, journal_tx_t *tx, uint32_t ino, const stratafs_disk_inode_t *inode) {
@@ -308,99 +341,68 @@ int stratafs_write_inode(stratafs_t *fs, journal_tx_t *tx, uint32_t ino, const s
     if (res == 0) {
         memcpy(buf + offset, inode, sizeof(stratafs_disk_inode_t));
         if (tx) {
-            journal_write_block(tx, block_idx, buf);
+            res = journal_write_block(tx, block_idx, buf);
         } else {
-            stratafs_write_block(fs, block_idx, buf);
+            res = stratafs_write_block(fs, block_idx, buf);
         }
     }
     kfree(buf);
     return res;
 }
 
+static bool valid_data_block(const stratafs_t *fs, uint32_t block) {
+    return block >= fs->sb.data_start_block && block < fs->sb.total_blocks;
+}
+
+static int alloc_zero_block(stratafs_t *fs, journal_tx_t *tx, uint32_t *block) {
+    static const uint8_t zero[STRATAFS_BLOCK_SIZE];
+    int res = stratafs_alloc_block(fs, tx, block);
+    return res ? res : journal_write_block(tx, *block, zero);
+}
+
 static int stratafs_get_block_mapping(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inode_t *inode,
-                                      uint32_t file_block_idx, bool allocate, uint32_t *out_phys_block) {
-    if (file_block_idx < STRATAFS_NDIR_BLOCKS) {
-        if (inode->direct[file_block_idx] == 0) {
-            if (!allocate) {
-                *out_phys_block = 0;
-                return 0;
-            }
-            uint32_t new_blk = 0;
-            int a_res = stratafs_alloc_block(fs, tx, &new_blk);
-            if (a_res != 0) return a_res;
-
-            /* Zero the newly allocated block */
-            uint8_t *z = (uint8_t *)kmalloc(STRATAFS_BLOCK_SIZE);
-            if (z) {
-                memset(z, 0, STRATAFS_BLOCK_SIZE);
-                journal_write_block(tx, new_blk, z);
-                kfree(z);
-            }
-
-            inode->direct[file_block_idx] = new_blk;
+                                      uint32_t index, bool allocate, uint32_t *out_phys_block) {
+    if (index < STRATAFS_NDIR_BLOCKS) {
+        uint32_t block = inode->direct[index];
+        if (!block && allocate) {
+            int res = alloc_zero_block(fs, tx, &block);
+            if (res != 0) return res;
+            inode->direct[index] = block;
             inode->blocks += STRATAFS_SECTORS_PER_BLOCK;
         }
-        *out_phys_block = inode->direct[file_block_idx];
+        if (block && !valid_data_block(fs, block)) return -STRATUM_EIO;
+        *out_phys_block = block;
         return 0;
     }
 
-    uint32_t indir_idx = file_block_idx - STRATAFS_NDIR_BLOCKS;
-    if (indir_idx < STRATAFS_INDIR_BLOCKS) {
-        if (inode->indirect == 0) {
-            if (!allocate) {
-                *out_phys_block = 0;
-                return 0;
-            }
-            uint32_t indir_blk = 0;
-            int a_res = stratafs_alloc_block(fs, tx, &indir_blk);
-            if (a_res != 0) return a_res;
-
-            uint8_t *z = (uint8_t *)kmalloc(STRATAFS_BLOCK_SIZE);
-            if (z) {
-                memset(z, 0, STRATAFS_BLOCK_SIZE);
-                journal_write_block(tx, indir_blk, z);
-                kfree(z);
-            }
-
-            inode->indirect = indir_blk;
-            inode->blocks += STRATAFS_SECTORS_PER_BLOCK;
+    index -= STRATAFS_NDIR_BLOCKS;
+    if (index >= STRATAFS_INDIR_BLOCKS) return -STRATUM_EFBIG;
+    if (!inode->indirect) {
+        if (!allocate) {
+            *out_phys_block = 0;
+            return 0;
         }
-
-        uint32_t *entries = (uint32_t *)kmalloc(STRATAFS_BLOCK_SIZE);
-        if (!entries) return -STRATUM_ENOMEM;
-        stratafs_read_block_tx(fs, tx, inode->indirect, entries);
-
-        if (entries[indir_idx] == 0) {
-            if (!allocate) {
-                *out_phys_block = 0;
-                kfree(entries);
-                return 0;
-            }
-            uint32_t new_blk = 0;
-            int a_res = stratafs_alloc_block(fs, tx, &new_blk);
-            if (a_res != 0) {
-                kfree(entries);
-                return a_res;
-            }
-
-            uint8_t *z = (uint8_t *)kmalloc(STRATAFS_BLOCK_SIZE);
-            if (z) {
-                memset(z, 0, STRATAFS_BLOCK_SIZE);
-                journal_write_block(tx, new_blk, z);
-                kfree(z);
-            }
-
-            entries[indir_idx] = new_blk;
-            inode->blocks += STRATAFS_SECTORS_PER_BLOCK;
-            journal_write_block(tx, inode->indirect, entries);
-        }
-
-        *out_phys_block = entries[indir_idx];
-        kfree(entries);
-        return 0;
+        uint32_t indirect;
+        int res = alloc_zero_block(fs, tx, &indirect);
+        if (res != 0) return res;
+        inode->indirect = indirect;
+        inode->blocks += STRATAFS_SECTORS_PER_BLOCK;
     }
-
-    return -STRATUM_EFBIG;
+    if (!valid_data_block(fs, inode->indirect)) return -STRATUM_EIO;
+    uint32_t *entries = kmalloc(STRATAFS_BLOCK_SIZE);
+    if (!entries) return -STRATUM_ENOMEM;
+    int res = stratafs_read_block_tx(fs, tx, inode->indirect, entries);
+    if (res == 0 && !entries[index] && allocate) {
+        res = alloc_zero_block(fs, tx, &entries[index]);
+        if (res == 0) res = journal_write_block(tx, inode->indirect, entries);
+        if (res == 0) inode->blocks += STRATAFS_SECTORS_PER_BLOCK;
+    }
+    if (res == 0) {
+        *out_phys_block = entries[index];
+        if (entries[index] && !valid_data_block(fs, entries[index])) res = -STRATUM_EIO;
+    }
+    kfree(entries);
+    return res;
 }
 
 int64_t stratafs_read_file(stratafs_t *fs, stratafs_disk_inode_t *inode, uint64_t offset, void *buf, size_t count) {
@@ -408,7 +410,7 @@ int64_t stratafs_read_file(stratafs_t *fs, stratafs_disk_inode_t *inode, uint64_
     if (offset >= inode->size) return 0;
 
     size_t to_read = count;
-    if (offset + to_read > inode->size) {
+    if (to_read > inode->size - offset) {
         to_read = (size_t)(inode->size - offset);
     }
 
@@ -434,7 +436,11 @@ int64_t stratafs_read_file(stratafs_t *fs, stratafs_disk_inode_t *inode, uint64_
         }
 
         if (phys_blk != 0) {
-            stratafs_read_block(fs, phys_blk, block_buf);
+            int res = stratafs_read_block(fs, phys_blk, block_buf);
+            if (res != 0) {
+                kfree(block_buf);
+                return bytes_read ? (int64_t)bytes_read : res;
+            }
             memcpy(dst + bytes_read, block_buf + blk_off, chunk);
         } else {
             memset(dst + bytes_read, 0, chunk); /* Sparse hole */
@@ -450,6 +456,11 @@ int64_t stratafs_read_file(stratafs_t *fs, stratafs_disk_inode_t *inode, uint64_
 int64_t stratafs_write_file(stratafs_t *fs, journal_tx_t *tx, uint32_t ino, stratafs_disk_inode_t *inode,
                             uint64_t offset, const void *buf, size_t count) {
     if (!fs || !tx || !inode || !buf) return -STRATUM_EINVAL;
+
+    if (offset > STRATAFS_MAX_FILE_SIZE || count > STRATAFS_MAX_FILE_SIZE - offset) {
+        return -STRATUM_EFBIG;
+    }
+    if (count == 0) return 0;
 
     const uint8_t *src = (const uint8_t *)buf;
     size_t bytes_written = 0;
@@ -469,17 +480,25 @@ int64_t stratafs_write_file(stratafs_t *fs, journal_tx_t *tx, uint32_t ino, stra
         int m_res = stratafs_get_block_mapping(fs, tx, inode, blk_idx, true, &phys_blk);
         if (m_res != 0) {
             kfree(block_buf);
-            return (bytes_written > 0) ? (int64_t)bytes_written : m_res;
+            return m_res;
         }
 
         if (chunk == STRATAFS_BLOCK_SIZE) {
             memcpy(block_buf, src + bytes_written, chunk);
         } else {
-            stratafs_read_block_tx(fs, tx, phys_blk, block_buf);
+            int res = stratafs_read_block_tx(fs, tx, phys_blk, block_buf);
+            if (res != 0) {
+                kfree(block_buf);
+                return res;
+            }
             memcpy(block_buf + blk_off, src + bytes_written, chunk);
         }
 
-        journal_write_block(tx, phys_blk, block_buf);
+        int res = journal_write_block(tx, phys_blk, block_buf);
+        if (res != 0) {
+            kfree(block_buf);
+            return res;
+        }
         bytes_written += chunk;
     }
 
@@ -487,338 +506,363 @@ int64_t stratafs_write_file(stratafs_t *fs, journal_tx_t *tx, uint32_t ino, stra
         inode->size = offset + bytes_written;
     }
     inode->mtime = timer_get_uptime_ms();
-    stratafs_write_inode(fs, tx, ino, inode);
-
+    int res = stratafs_write_inode(fs, tx, ino, inode);
     kfree(block_buf);
-    return (int64_t)bytes_written;
+    return res ? res : (int64_t)bytes_written;
+}
+
+static bool is_directory(const stratafs_disk_inode_t *inode) {
+    return (inode->mode & STRATAFS_MODE_MASK) == VFS_MODE_IFDIR;
+}
+
+static int find_dirent(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inode_t *dir,
+                       const char *name, uint8_t *buf, uint32_t *block, uint32_t *index,
+                       bool find_empty) {
+    if (!is_directory(dir)) return -STRATUM_ENOTDIR;
+    if (dir->size == 0 || dir->size > STRATAFS_MAX_FILE_SIZE || dir->size % STRATAFS_BLOCK_SIZE) {
+        return -STRATUM_EIO;
+    }
+    uint32_t blocks = (uint32_t)(dir->size / STRATAFS_BLOCK_SIZE);
+    size_t name_len = strlen(name);
+    for (uint32_t b = 0; b < blocks; b++) {
+        int res = stratafs_get_block_mapping(fs, tx, dir, b, false, block);
+        if (res != 0) return res;
+        if (*block == 0) return -STRATUM_EIO;
+        res = stratafs_read_block_tx(fs, tx, *block, buf);
+        if (res != 0) return res;
+        stratafs_disk_dirent_t *entries = (stratafs_disk_dirent_t *)buf;
+        for (uint32_t i = 0; i < STRATAFS_BLOCK_SIZE / sizeof(*entries); i++) {
+            const stratafs_disk_dirent_t *de = &entries[i];
+            if (de->inode_num != 0 &&
+                (de->record_len != sizeof(*de) || de->name_len == 0 ||
+                 de->name_len >= sizeof(de->name) || de->inode_num >= fs->sb.total_inodes)) {
+                return -STRATUM_EIO;
+            }
+            if ((find_empty && de->inode_num == 0) ||
+                (!find_empty && de->inode_num != 0 && de->name_len == name_len &&
+                 memcmp(de->name, name, name_len) == 0)) {
+                *index = i;
+                return 0;
+            }
+        }
+    }
+    return -STRATUM_ENOENT;
 }
 
 int stratafs_dir_lookup(stratafs_t *fs, stratafs_disk_inode_t *dir, const char *name, uint32_t *out_ino) {
-    if (!fs || !dir || !name || !out_ino) return -STRATUM_EINVAL;
-
-    uint8_t *buf = (uint8_t *)kmalloc(STRATAFS_BLOCK_SIZE);
+    uint8_t *buf = kmalloc(STRATAFS_BLOCK_SIZE);
     if (!buf) return -STRATUM_ENOMEM;
-
-    uint32_t num_blocks = (uint32_t)((dir->size + STRATAFS_BLOCK_SIZE - 1) / STRATAFS_BLOCK_SIZE);
-    for (uint32_t b = 0; b < num_blocks; b++) {
-        uint32_t phys_blk = 0;
-        if (stratafs_get_block_mapping(fs, NULL, dir, b, false, &phys_blk) != 0 || phys_blk == 0) {
-            continue;
-        }
-
-        stratafs_read_block(fs, phys_blk, buf);
-
-        uint32_t off = 0;
-        while (off < STRATAFS_BLOCK_SIZE) {
-            stratafs_disk_dirent_t *de = (stratafs_disk_dirent_t *)(buf + off);
-            if (de->record_len == 0) break;
-
-            if (de->inode_num != 0 && strcmp(de->name, name) == 0) {
-                *out_ino = de->inode_num;
-                kfree(buf);
-                return 0;
-            }
-            off += de->record_len;
-        }
-    }
-
+    uint32_t block, index;
+    int res = find_dirent(fs, NULL, dir, name, buf, &block, &index, false);
+    if (res == 0) *out_ino = ((stratafs_disk_dirent_t *)buf)[index].inode_num;
     kfree(buf);
-    return -STRATUM_ENOENT;
+    return res;
+}
+
+static void init_dirent(stratafs_disk_dirent_t *entry, const char *name, uint32_t ino, uint8_t type) {
+    memset(entry, 0, sizeof(*entry));
+    entry->inode_num = ino;
+    entry->record_len = sizeof(*entry);
+    entry->name_len = (uint8_t)strlen(name);
+    entry->file_type = type;
+    memcpy(entry->name, name, entry->name_len);
 }
 
 int stratafs_dir_add(stratafs_t *fs, journal_tx_t *tx, uint32_t dir_ino, stratafs_disk_inode_t *dir,
                      const char *name, uint32_t ino, uint8_t file_type) {
-    if (!fs || !tx || !dir || !name) return -STRATUM_EINVAL;
-
-    uint8_t *buf = (uint8_t *)kmalloc(STRATAFS_BLOCK_SIZE);
+    if (strlen(name) >= sizeof(((stratafs_disk_dirent_t *)0)->name)) return -STRATUM_ENAMETOOLONG;
+    uint8_t *buf = kmalloc(STRATAFS_BLOCK_SIZE);
     if (!buf) return -STRATUM_ENOMEM;
-
-    uint32_t num_blocks = (uint32_t)((dir->size + STRATAFS_BLOCK_SIZE - 1) / STRATAFS_BLOCK_SIZE);
-    if (num_blocks == 0) num_blocks = 1;
-
-    for (uint32_t b = 0; b < num_blocks; b++) {
-        uint32_t phys_blk = 0;
-        int m_res = stratafs_get_block_mapping(fs, tx, dir, b, true, &phys_blk);
-        if (m_res != 0) {
-            kfree(buf);
-            return m_res;
-        }
-
-        stratafs_read_block_tx(fs, tx, phys_blk, buf);
-
-        uint32_t off = 0;
-        while (off < STRATAFS_BLOCK_SIZE) {
-            stratafs_disk_dirent_t *de = (stratafs_disk_dirent_t *)(buf + off);
-            if (de->record_len == 0 || de->inode_num == 0) {
-                de->inode_num = ino;
-                de->record_len = sizeof(stratafs_disk_dirent_t);
-                de->name_len = (uint8_t)strlen(name);
-                de->file_type = file_type;
-                strncpy(de->name, name, sizeof(de->name) - 1);
-
-                journal_write_block(tx, phys_blk, buf);
-
-                if ((b * STRATAFS_BLOCK_SIZE + off + sizeof(stratafs_disk_dirent_t)) > dir->size) {
-                    dir->size = b * STRATAFS_BLOCK_SIZE + off + sizeof(stratafs_disk_dirent_t);
-                    stratafs_write_inode(fs, tx, dir_ino, dir);
-                }
-
-                kfree(buf);
-                return 0;
-            }
-            off += de->record_len;
+    uint32_t block, index;
+    int res = find_dirent(fs, tx, dir, name, buf, &block, &index, true);
+    if (res == -STRATUM_ENOENT) {
+        res = stratafs_get_block_mapping(fs, tx, dir, (uint32_t)(dir->size / STRATAFS_BLOCK_SIZE), true, &block);
+        if (res == 0) {
+            index = 0;
+            memset(buf, 0, STRATAFS_BLOCK_SIZE);
+            dir->size += STRATAFS_BLOCK_SIZE;
+            res = stratafs_write_inode(fs, tx, dir_ino, dir);
         }
     }
-
+    if (res == 0) {
+        init_dirent(&((stratafs_disk_dirent_t *)buf)[index], name, ino, file_type);
+        res = journal_write_block(tx, block, buf);
+    }
     kfree(buf);
-    return -STRATUM_ENOSPC;
+    return res;
 }
 
-int stratafs_dir_remove(stratafs_t *fs, journal_tx_t *tx, uint32_t dir_ino, stratafs_disk_inode_t *dir, const char *name) {
-    if (!fs || !tx || !dir || !name) return -STRATUM_EINVAL;
-
-    uint8_t *buf = (uint8_t *)kmalloc(STRATAFS_BLOCK_SIZE);
+static int remove_dirent(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inode_t *dir, const char *name) {
+    uint8_t *buf = kmalloc(STRATAFS_BLOCK_SIZE);
     if (!buf) return -STRATUM_ENOMEM;
+    uint32_t block, index;
+    int res = find_dirent(fs, tx, dir, name, buf, &block, &index, false);
+    if (res == 0) {
+        memset(&((stratafs_disk_dirent_t *)buf)[index], 0, sizeof(stratafs_disk_dirent_t));
+        res = journal_write_block(tx, block, buf);
+    }
+    kfree(buf);
+    return res;
+}
 
-    uint32_t num_blocks = (uint32_t)((dir->size + STRATAFS_BLOCK_SIZE - 1) / STRATAFS_BLOCK_SIZE);
-    for (uint32_t b = 0; b < num_blocks; b++) {
-        uint32_t phys_blk = 0;
-        if (stratafs_get_block_mapping(fs, NULL, dir, b, false, &phys_blk) != 0 || phys_blk == 0) {
-            continue;
-        }
+static uint32_t count_free(const uint8_t *bitmap, uint32_t limit) {
+    uint32_t free_count = 0;
+    for (uint32_t bit = 0; bit < limit; bit++) {
+        if (!(bitmap[bit / 8] & (1U << (bit % 8)))) free_count++;
+    }
+    return free_count;
+}
 
-        stratafs_read_block_tx(fs, tx, phys_blk, buf);
-
-        uint32_t off = 0;
-        while (off < STRATAFS_BLOCK_SIZE) {
-            stratafs_disk_dirent_t *de = (stratafs_disk_dirent_t *)(buf + off);
-            if (de->record_len == 0) break;
-
-            if (de->inode_num != 0 && strcmp(de->name, name) == 0) {
-                de->inode_num = 0; /* Mark unlinked */
-                journal_write_block(tx, phys_blk, buf);
-                stratafs_write_inode(fs, tx, dir_ino, dir);
-                kfree(buf);
-                return 0;
-            }
-            off += de->record_len;
-        }
+static int finish_tx(stratafs_t *fs, journal_tx_t *tx, int res) {
+    if (!tx) return res;
+    if (res != 0) {
+        journal_abort(tx);
+        return res;
     }
 
-    kfree(buf);
-    return -STRATUM_ENOENT;
+    uint8_t *scratch = kmalloc(STRATAFS_BLOCK_SIZE);
+    if (!scratch) {
+        journal_abort(tx);
+        return -STRATUM_ENOMEM;
+    }
+    uint64_t free_blocks = fs->sb.free_blocks;
+    uint32_t free_inodes = fs->sb.free_inodes;
+    bool updated = false;
+    if (journal_read_block(tx, fs->sb.block_bitmap_block, scratch) == 0) {
+        free_blocks = count_free(scratch, (uint32_t)fs->sb.total_blocks);
+        updated = true;
+    }
+    if (journal_read_block(tx, fs->sb.inode_bitmap_block, scratch) == 0) {
+        free_inodes = count_free(scratch, fs->sb.total_inodes);
+        updated = true;
+    }
+    if (updated) {
+        stratafs_sb_t *sb = (stratafs_sb_t *)scratch;
+        *sb = fs->sb;
+        sb->free_blocks = free_blocks;
+        sb->free_inodes = free_inodes;
+        sb->checksum = superblock_checksum(sb);
+        res = journal_write_block(tx, 1, sb);
+    }
+    kfree(scratch);
+    if (res != 0) {
+        journal_abort(tx);
+        return res;
+    }
+
+    res = journal_commit(&fs->journal, tx);
+    if (res == 0) {
+        fs->sb.free_blocks = free_blocks;
+        fs->sb.free_inodes = free_inodes;
+    }
+    return res;
 }
 
-/* --- VFS Integration --- */
+static int load_node(stratafs_t *fs, const vfs_node_t *node, stratafs_disk_inode_t *inode) {
+    if (!fs->journal.active) return -STRATUM_EIO;
+    int res = stratafs_read_inode(fs, (uint32_t)node->inode_num, inode);
+    if (res != 0) return res;
+    return inode->mode && inode->generation == node->generation ? 0 : -STRATUM_ENOENT;
+}
 
 static int stratafs_vfs_lookup(vfs_node_t *parent, const char *name, vfs_node_t **out_child) {
-    stratafs_t *fs = (stratafs_t *)parent->mount->fs_priv;
-    stratafs_disk_inode_t dinode;
-    int res = stratafs_read_inode(fs, (uint32_t)parent->inode_num, &dinode);
-    if (res != 0) return res;
+    stratafs_t *fs = parent->mount->fs_priv;
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    stratafs_disk_inode_t dir, inode;
+    uint32_t ino;
+    int res = load_node(fs, parent, &dir);
+    if (res == 0) res = stratafs_dir_lookup(fs, &dir, name, &ino);
+    if (res == 0) res = stratafs_read_inode(fs, ino, &inode);
+    if (res == 0 && !inode.mode) res = -STRATUM_EIO;
+    if (res == 0) {
+        *out_child = stratafs_create_vfs_node(fs, ino, &inode, name);
+        if (!*out_child) res = -STRATUM_ENOMEM;
+    }
+    spin_unlock_irqrestore(&fs->lock, flags);
+    return res;
+}
 
-    uint32_t child_ino = 0;
-    res = stratafs_dir_lookup(fs, &dinode, name, &child_ino);
-    if (res != 0) return res;
+static int create_entry(vfs_node_t *parent, const char *name, uint16_t mode, vfs_node_t **out_child) {
+    stratafs_t *fs = parent->mount->fs_priv;
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    stratafs_disk_inode_t dir, inode;
+    journal_tx_t *tx = NULL;
+    vfs_node_t *child = NULL;
+    uint32_t ino;
+    int res = load_node(fs, parent, &dir);
+    if (res != 0) goto out;
+    res = stratafs_dir_lookup(fs, &dir, name, &ino);
+    if (res == 0) res = -STRATUM_EEXIST;
+    if (res != -STRATUM_ENOENT) goto out;
+    res = journal_begin(&fs->journal, &tx);
+    if (res != 0) goto out;
+    res = stratafs_alloc_inode(fs, tx, mode, &ino);
+    if (res != 0) goto out;
+    res = read_inode(fs, tx, ino, &inode);
+    if (res != 0) goto out;
+    if (is_directory(&inode)) {
+        uint32_t block;
+        res = stratafs_alloc_block(fs, tx, &block);
+        if (res != 0) goto out;
+        stratafs_disk_dirent_t *entries = kmalloc(STRATAFS_BLOCK_SIZE);
+        if (!entries) {
+            res = -STRATUM_ENOMEM;
+            goto out;
+        }
+        memset(entries, 0, STRATAFS_BLOCK_SIZE);
+        init_dirent(&entries[0], ".", ino, STRATAFS_FT_DIR);
+        init_dirent(&entries[1], "..", (uint32_t)parent->inode_num, STRATAFS_FT_DIR);
+        res = journal_write_block(tx, block, entries);
+        kfree(entries);
+        if (res != 0) goto out;
+        inode.direct[0] = block;
+        inode.size = STRATAFS_BLOCK_SIZE;
+        inode.blocks = STRATAFS_SECTORS_PER_BLOCK;
+        res = stratafs_write_inode(fs, tx, ino, &inode);
+        if (res != 0) goto out;
+        dir.nlink++;
+        res = stratafs_write_inode(fs, tx, (uint32_t)parent->inode_num, &dir);
+        if (res != 0) goto out;
+    }
 
-    stratafs_disk_inode_t child_dinode;
-    res = stratafs_read_inode(fs, child_ino, &child_dinode);
-    if (res != 0) return res;
-
-    vfs_node_t *node = stratafs_create_vfs_node(fs, child_ino, &child_dinode, name);
-    if (!node) return -STRATUM_ENOMEM;
-
-    node->mount = parent->mount;
-    *out_child = node;
-    return 0;
+    res = stratafs_dir_add(fs, tx, (uint32_t)parent->inode_num, &dir, name, ino,
+                          is_directory(&inode) ? STRATAFS_FT_DIR : STRATAFS_FT_REG);
+    if (res == 0) {
+        child = stratafs_create_vfs_node(fs, ino, &inode, name);
+        if (!child) res = -STRATUM_ENOMEM;
+    }
+out:
+    res = finish_tx(fs, tx, res);
+    spin_unlock_irqrestore(&fs->lock, flags);
+    if (res == 0) *out_child = child;
+    else vfs_node_release(child);
+    return res;
 }
 
 static int stratafs_vfs_create(vfs_node_t *parent, const char *name, uint32_t mode, vfs_node_t **out_child) {
-    stratafs_t *fs = (stratafs_t *)parent->mount->fs_priv;
-
-    journal_tx_t *tx = NULL;
-    int res = journal_begin(&fs->journal, &tx);
-    if (res != 0) return res;
-
-    stratafs_disk_inode_t p_dinode;
-    stratafs_read_inode(fs, (uint32_t)parent->inode_num, &p_dinode);
-
-    uint32_t new_ino = 0;
-    res = stratafs_alloc_inode(fs, tx, (uint16_t)(VFS_MODE_IFREG | (mode & 0777)), &new_ino);
-    if (res != 0) {
-        journal_commit(&fs->journal, tx);
-        return res;
-    }
-
-    res = stratafs_dir_add(fs, tx, (uint32_t)parent->inode_num, &p_dinode, name, new_ino, STRATAFS_FT_REG);
-    if (res != 0) {
-        stratafs_free_inode(fs, tx, new_ino);
-        journal_commit(&fs->journal, tx);
-        return res;
-    }
-
-    journal_commit(&fs->journal, tx);
-
-    stratafs_disk_inode_t child_dinode;
-    stratafs_read_inode(fs, new_ino, &child_dinode);
-
-    vfs_node_t *child = stratafs_create_vfs_node(fs, new_ino, &child_dinode, name);
-    if (!child) return -STRATUM_ENOMEM;
-    child->mount = parent->mount;
-
-    *out_child = child;
-    return 0;
+    return create_entry(parent, name, (uint16_t)(VFS_MODE_IFREG | (mode & 0777)), out_child);
 }
 
 static int stratafs_vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t mode, vfs_node_t **out_child) {
-    stratafs_t *fs = (stratafs_t *)parent->mount->fs_priv;
+    return create_entry(parent, name, (uint16_t)(VFS_MODE_IFDIR | (mode & 0777)), out_child);
+}
 
-    journal_tx_t *tx = NULL;
-    int res = journal_begin(&fs->journal, &tx);
-    if (res != 0) return res;
-
-    stratafs_disk_inode_t p_dinode;
-    stratafs_read_inode(fs, (uint32_t)parent->inode_num, &p_dinode);
-
-    uint32_t new_ino = 0;
-    res = stratafs_alloc_inode(fs, tx, (uint16_t)(VFS_MODE_IFDIR | (mode & 0777)), &new_ino);
-    if (res != 0) {
-        journal_commit(&fs->journal, tx);
-        return res;
+static int free_file_blocks(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inode_t *inode) {
+    if (inode->double_indirect) return -STRATUM_EIO;
+    for (uint32_t i = 0; i < STRATAFS_NDIR_BLOCKS; i++) {
+        if (!inode->direct[i]) continue;
+        int res = stratafs_free_block(fs, tx, inode->direct[i]);
+        if (res != 0) return res;
+        inode->direct[i] = 0;
     }
-
-    /* Allocate one data block for the directory dot and dotdot entries */
-    uint32_t dir_blk = 0;
-    stratafs_alloc_block(fs, tx, &dir_blk);
-
-    uint8_t *buf = (uint8_t *)kmalloc(STRATAFS_BLOCK_SIZE);
-    if (buf) {
-        memset(buf, 0, STRATAFS_BLOCK_SIZE);
-        stratafs_disk_dirent_t *dot = (stratafs_disk_dirent_t *)buf;
-        dot->inode_num = new_ino;
-        dot->record_len = sizeof(stratafs_disk_dirent_t);
-        dot->name_len = 1;
-        dot->file_type = STRATAFS_FT_DIR;
-        strcpy(dot->name, ".");
-
-        stratafs_disk_dirent_t *dotdot = (stratafs_disk_dirent_t *)(buf + sizeof(stratafs_disk_dirent_t));
-        dotdot->inode_num = (uint32_t)parent->inode_num;
-        dotdot->record_len = sizeof(stratafs_disk_dirent_t);
-        dotdot->name_len = 2;
-        dotdot->file_type = STRATAFS_FT_DIR;
-        strcpy(dotdot->name, "..");
-
-        journal_write_block(tx, dir_blk, buf);
-        kfree(buf);
+    if (inode->indirect) {
+        if (!valid_data_block(fs, inode->indirect)) return -STRATUM_EIO;
+        uint32_t *entries = kmalloc(STRATAFS_BLOCK_SIZE);
+        if (!entries) return -STRATUM_ENOMEM;
+        int res = stratafs_read_block(fs, inode->indirect, entries);
+        for (uint32_t i = 0; res == 0 && i < STRATAFS_INDIR_BLOCKS; i++) {
+            if (entries[i]) res = stratafs_free_block(fs, tx, entries[i]);
+        }
+        kfree(entries);
+        if (res != 0) return res;
+        res = stratafs_free_block(fs, tx, inode->indirect);
+        if (res != 0) return res;
+        inode->indirect = 0;
     }
-
-    stratafs_disk_inode_t new_dinode;
-    stratafs_read_inode(fs, new_ino, &new_dinode);
-    new_dinode.direct[0] = dir_blk;
-    new_dinode.size = STRATAFS_BLOCK_SIZE;
-    new_dinode.blocks = STRATAFS_SECTORS_PER_BLOCK;
-    stratafs_write_inode(fs, tx, new_ino, &new_dinode);
-
-    res = stratafs_dir_add(fs, tx, (uint32_t)parent->inode_num, &p_dinode, name, new_ino, STRATAFS_FT_DIR);
-    if (res != 0) {
-        stratafs_free_inode(fs, tx, new_ino);
-        journal_commit(&fs->journal, tx);
-        return res;
-    }
-
-    p_dinode.nlink++;
-    stratafs_write_inode(fs, tx, (uint32_t)parent->inode_num, &p_dinode);
-
-    journal_commit(&fs->journal, tx);
-
-    vfs_node_t *child = stratafs_create_vfs_node(fs, new_ino, &new_dinode, name);
-    if (child) {
-        child->mount = parent->mount;
-    }
-    *out_child = child;
+    inode->blocks = 0;
+    inode->size = 0;
     return 0;
 }
 
 static int stratafs_vfs_unlink(vfs_node_t *parent, const char *name) {
-    stratafs_t *fs = (stratafs_t *)parent->mount->fs_priv;
-
+    stratafs_t *fs = parent->mount->fs_priv;
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    stratafs_disk_inode_t dir, inode;
+    uint32_t ino = 0;
     journal_tx_t *tx = NULL;
-    int res = journal_begin(&fs->journal, &tx);
-    if (res != 0) return res;
+    int res = load_node(fs, parent, &dir);
+    if (res == 0) res = stratafs_dir_lookup(fs, &dir, name, &ino);
+    if (res == 0) res = stratafs_read_inode(fs, ino, &inode);
+    if (res == 0 && (is_directory(&inode) || !inode.mode)) res = -STRATUM_EISDIR;
+    if (res == 0 && fs->open_count[ino]) res = -STRATUM_EBUSY;
+    if (res == 0) res = journal_begin(&fs->journal, &tx);
+    if (res == 0) res = remove_dirent(fs, tx, &dir, name);
+    if (res == 0) res = free_file_blocks(fs, tx, &inode);
+    if (res == 0) res = stratafs_free_inode(fs, tx, ino);
+    res = finish_tx(fs, tx, res);
+    spin_unlock_irqrestore(&fs->lock, flags);
+    return res;
+}
 
-    stratafs_disk_inode_t p_dinode;
-    stratafs_read_inode(fs, (uint32_t)parent->inode_num, &p_dinode);
-
-    uint32_t target_ino = 0;
-    res = stratafs_dir_lookup(fs, &p_dinode, name, &target_ino);
-    if (res != 0) {
-        journal_commit(&fs->journal, tx);
-        return res;
+static int stratafs_vfs_open(vfs_node_t *node, uint32_t open_flags) {
+    stratafs_t *fs = node->mount->fs_priv;
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    stratafs_disk_inode_t inode;
+    int res = load_node(fs, node, &inode);
+    if (res == 0 && is_directory(&inode)) res = -STRATUM_EISDIR;
+    if (res == 0 && (open_flags & O_TRUNC)) {
+        journal_tx_t *tx = NULL;
+        res = journal_begin(&fs->journal, &tx);
+        if (res == 0) res = free_file_blocks(fs, tx, &inode);
+        if (res == 0) res = stratafs_write_inode(fs, tx, (uint32_t)node->inode_num, &inode);
+        res = finish_tx(fs, tx, res);
     }
-
-    res = stratafs_dir_remove(fs, tx, (uint32_t)parent->inode_num, &p_dinode, name);
-    if (res != 0) {
-        journal_commit(&fs->journal, tx);
-        return res;
+    if (res == 0) {
+        fs->open_count[node->inode_num]++;
+        node->size = inode.size;
     }
+    spin_unlock_irqrestore(&fs->lock, flags);
+    return res;
+}
 
-    /* Free target inode data blocks */
-    stratafs_disk_inode_t t_dinode;
-    stratafs_read_inode(fs, target_ino, &t_dinode);
-
-    for (int i = 0; i < STRATAFS_NDIR_BLOCKS; i++) {
-        if (t_dinode.direct[i] != 0) {
-            stratafs_free_block(fs, tx, t_dinode.direct[i]);
-            t_dinode.direct[i] = 0;
-        }
-    }
-    if (t_dinode.indirect != 0) {
-        uint32_t *ind = (uint32_t *)kmalloc(STRATAFS_BLOCK_SIZE);
-        if (ind) {
-            stratafs_read_block(fs, t_dinode.indirect, ind);
-            for (uint32_t k = 0; k < STRATAFS_INDIR_BLOCKS; k++) {
-                if (ind[k] != 0) stratafs_free_block(fs, tx, ind[k]);
-            }
-            kfree(ind);
-        }
-        stratafs_free_block(fs, tx, t_dinode.indirect);
-        t_dinode.indirect = 0;
-    }
-
-    stratafs_free_inode(fs, tx, target_ino);
-    journal_commit(&fs->journal, tx);
+static int stratafs_vfs_close(vfs_node_t *node) {
+    stratafs_t *fs = node->mount->fs_priv;
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    fs->open_count[node->inode_num]--;
+    spin_unlock_irqrestore(&fs->lock, flags);
     return 0;
 }
 
 static int64_t stratafs_vfs_read(vfs_node_t *node, uint64_t offset, void *buf, size_t count) {
-    stratafs_t *fs = (stratafs_t *)node->mount->fs_priv;
-    stratafs_disk_inode_t dinode;
-    stratafs_read_inode(fs, (uint32_t)node->inode_num, &dinode);
-    return stratafs_read_file(fs, &dinode, offset, buf, count);
+    stratafs_t *fs = node->mount->fs_priv;
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    stratafs_disk_inode_t inode;
+    int res = load_node(fs, node, &inode);
+    int64_t read = res ? res : stratafs_read_file(fs, &inode, offset, buf, count);
+    spin_unlock_irqrestore(&fs->lock, flags);
+    return read;
 }
 
 static int64_t stratafs_vfs_write(vfs_node_t *node, uint64_t offset, const void *buf, size_t count) {
-    stratafs_t *fs = (stratafs_t *)node->mount->fs_priv;
-    stratafs_disk_inode_t dinode;
-    stratafs_read_inode(fs, (uint32_t)node->inode_num, &dinode);
-
+    stratafs_t *fs = node->mount->fs_priv;
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    stratafs_disk_inode_t inode;
     journal_tx_t *tx = NULL;
-    int res = journal_begin(&fs->journal, &tx);
-    if (res != 0) return res;
-
-    int64_t wr = stratafs_write_file(fs, tx, (uint32_t)node->inode_num, &dinode, offset, buf, count);
-    journal_commit(&fs->journal, tx);
-
-    if (wr > 0) {
-        node->size = dinode.size;
-    }
-    return wr;
+    int res = load_node(fs, node, &inode);
+    if (res == 0) res = journal_begin(&fs->journal, &tx);
+    if (res == 0 && offset == VFS_APPEND_OFFSET) offset = inode.size;
+    int64_t written = res ? res : stratafs_write_file(fs, tx, (uint32_t)node->inode_num, &inode,
+                                                      offset, buf, count);
+    res = finish_tx(fs, tx, written < 0 ? (int)written : 0);
+    if (res == 0) node->size = inode.size;
+    spin_unlock_irqrestore(&fs->lock, flags);
+    return res ? res : written;
 }
 
 static int stratafs_vfs_stat(vfs_node_t *node, vfs_stat_t *out_st) {
     stratafs_t *fs = (stratafs_t *)node->mount->fs_priv;
     stratafs_disk_inode_t dinode;
-    int res = stratafs_read_inode(fs, (uint32_t)node->inode_num, &dinode);
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    int res = load_node(fs, node, &dinode);
+    spin_unlock_irqrestore(&fs->lock, flags);
     if (res != 0) return res;
 
     memset(out_st, 0, sizeof(vfs_stat_t));
@@ -838,12 +882,16 @@ static int stratafs_vfs_stat(vfs_node_t *node, vfs_stat_t *out_st) {
 
 static int stratafs_vfs_sync(vfs_node_t *node) {
     stratafs_t *fs = (stratafs_t *)node->mount->fs_priv;
-    return journal_checkpoint(&fs->journal);
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    int res = journal_checkpoint(&fs->journal);
+    spin_unlock_irqrestore(&fs->lock, flags);
+    return res;
 }
 
 const vfs_node_ops_t g_stratafs_node_ops = {
-    .open     = NULL,
-    .close    = NULL,
+    .open     = stratafs_vfs_open,
+    .close    = stratafs_vfs_close,
     .read     = stratafs_vfs_read,
     .write    = stratafs_vfs_write,
     .lookup   = stratafs_vfs_lookup,
@@ -857,12 +905,13 @@ const vfs_node_ops_t g_stratafs_node_ops = {
 };
 
 static vfs_node_t *stratafs_create_vfs_node(stratafs_t *fs, uint32_t ino, const stratafs_disk_inode_t *dinode, const char *name) {
-    (void)fs;
     vfs_node_t *node = vfs_node_alloc();
     if (!node) return NULL;
 
     strncpy(node->name, name, sizeof(node->name) - 1);
     node->inode_num = ino;
+    node->generation = dinode->generation;
+    node->mount = fs->mount;
     node->type = (dinode->mode & VFS_MODE_IFDIR) ? VFS_TYPE_DIR : VFS_TYPE_REG;
     node->mode = dinode->mode;
     node->size = dinode->size;
@@ -874,6 +923,41 @@ static vfs_node_t *stratafs_create_vfs_node(stratafs_t *fs, uint32_t ino, const 
     return node;
 }
 
+static bool valid_superblock(stratafs_t *fs) {
+    stratafs_sb_t *sb = &fs->sb;
+    return sb->magic == STRATAFS_MAGIC && sb->version == STRATAFS_VERSION &&
+        sb->block_size == STRATAFS_BLOCK_SIZE && sb->total_blocks >= 1024 &&
+        sb->total_blocks <= STRATAFS_MAX_BITMAP_BITS &&
+        sb->total_blocks <= fs->dev->capacity_sectors / STRATAFS_SECTORS_PER_BLOCK &&
+        sb->root_inode == STRATAFS_ROOT_INO && sb->total_inodes == 2048 &&
+        sb->block_bitmap_block == 2 && sb->block_bitmap_blocks == 1 &&
+        sb->inode_bitmap_block == 3 && sb->inode_bitmap_blocks == 1 &&
+        sb->inode_table_block == 4 && sb->inode_table_blocks == 64 &&
+        sb->journal_start_block == 68 && sb->journal_block_count == 512 &&
+        sb->data_start_block == 580 && sb->data_block_count == sb->total_blocks - 580 &&
+        sb->checksum == superblock_checksum(sb);
+}
+
+static bool blank_volume(stratafs_t *fs) {
+    uint8_t *buf = kmalloc(STRATAFS_BLOCK_SIZE);
+    if (!buf) return false;
+    bool blank = true;
+    for (uint64_t block = 0; blank && block < fs->dev->capacity_sectors / STRATAFS_SECTORS_PER_BLOCK; block++) {
+        if (stratafs_read_block(fs, block, buf) != 0) {
+            blank = false;
+            break;
+        }
+        for (size_t i = 0; i < STRATAFS_BLOCK_SIZE; i++) {
+            if (buf[i]) {
+                blank = false;
+                break;
+            }
+        }
+    }
+    kfree(buf);
+    return blank;
+}
+
 int stratafs_mount_fs(vfs_mount_t *mnt, const char *dev_name) {
     (void)dev_name;
     virtio_blk_dev_t *blk = virtio_blk_get_primary();
@@ -882,24 +966,24 @@ int stratafs_mount_fs(vfs_mount_t *mnt, const char *dev_name) {
         return -STRATUM_ENODEV;
     }
 
+    if (g_stratafs_active) return -STRATUM_EBUSY;
     stratafs_t *fs = &g_stratafs;
     memset(fs, 0, sizeof(stratafs_t));
     fs->dev = blk;
     spin_lock_init(&fs->lock);
     fs->mount = mnt;
 
-    /* Read Superblock */
     int res = stratafs_read_block(fs, 1, &fs->sb);
-    if (res != 0 || fs->sb.magic != STRATAFS_MAGIC) {
-        kprintf("[STRATAFS] Superblock invalid or unformatted. Formatting disk...\n");
+    if (res != 0) return res;
+    if (fs->sb.magic == 0 && blank_volume(fs)) {
         res = stratafs_format(blk);
         if (res != 0) return res;
-
         res = stratafs_read_block(fs, 1, &fs->sb);
-        if (res != 0 || fs->sb.magic != STRATAFS_MAGIC) {
-            kprintf("[STRATAFS] Failed to read superblock after formatting!\n");
-            return -STRATUM_EIO;
-        }
+        if (res != 0) return res;
+    }
+    if (!valid_superblock(fs)) {
+        kprintf("[STRATAFS] Invalid superblock. Refusing to format a nonblank volume.\n");
+        return -STRATUM_EIO;
     }
 
     /* Initialize Journal and crash recovery */
@@ -909,10 +993,19 @@ int stratafs_mount_fs(vfs_mount_t *mnt, const char *dev_name) {
         return res;
     }
 
+    /* Recovery can replay the filesystem superblock along with its bitmaps. */
+    res = stratafs_read_block(fs, 1, &fs->sb);
+    if (res != 0 || !valid_superblock(fs)) return -STRATUM_EIO;
+
     /* Create Root Node */
     stratafs_disk_inode_t root_dinode;
     res = stratafs_read_inode(fs, STRATAFS_ROOT_INO, &root_dinode);
     if (res != 0) return res;
+
+    if (!is_directory(&root_dinode) || !valid_data_block(fs, root_dinode.direct[0])) {
+        kprintf("[STRATAFS] Invalid root inode. Volume requires offline inspection.\n");
+        return -STRATUM_EIO;
+    }
 
     vfs_node_t *root_node = stratafs_create_vfs_node(fs, STRATAFS_ROOT_INO, &root_dinode, "/");
     if (!root_node) return -STRATUM_ENOMEM;
@@ -935,15 +1028,19 @@ static int stratafs_mount_op(vfs_mount_t *mnt, const char *dev) {
 static int stratafs_unmount_op(vfs_mount_t *mnt) {
     if (!mnt || !mnt->fs_priv) return -STRATUM_EINVAL;
     stratafs_t *fs = (stratafs_t *)mnt->fs_priv;
-    journal_checkpoint(&fs->journal);
-    g_stratafs_active = false;
-    return 0;
+    int res = journal_checkpoint(&fs->journal);
+    if (res == 0) g_stratafs_active = false;
+    return res;
 }
 
 static int stratafs_sync_op(vfs_mount_t *mnt) {
     if (!mnt || !mnt->fs_priv) return -STRATUM_EINVAL;
     stratafs_t *fs = (stratafs_t *)mnt->fs_priv;
-    return journal_checkpoint(&fs->journal);
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    int res = journal_checkpoint(&fs->journal);
+    spin_unlock_irqrestore(&fs->lock, flags);
+    return res;
 }
 
 static const vfs_mount_ops_t g_stratafs_mount_ops = {

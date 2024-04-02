@@ -1,5 +1,7 @@
 # Stratum Memory Architecture
 
+Design overview. See [verification status](../BUILD_STATUS.md) for exercised paths and open work.
+
 ```mermaid
 flowchart TD
     subgraph PhysicalMemory["Physical Memory Management"]

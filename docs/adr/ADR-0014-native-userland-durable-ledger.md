@@ -1,5 +1,7 @@
 # ADR-0014: Native User Runtime, Interactive Shell, and Durable Ledger Service
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

@@ -1,116 +1,83 @@
-# Stratum Operating System Root Makefile
-# Strict standalone cross-compilation on macOS / Linux
-
 SHELL := /bin/bash
-export SOURCE_DATE_EPOCH := 1700000000
+.DEFAULT_GOAL := all
 
-# Pinned Toolchain paths (with environment overrides)
 LLVM_PREFIX ?= /opt/homebrew/opt/llvm
-CLANG       ?= $(if $(wildcard $(LLVM_PREFIX)/bin/clang),$(LLVM_PREFIX)/bin/clang,clang)
-LD_LLD      ?= $(if $(wildcard /opt/homebrew/bin/ld.lld),/opt/homebrew/bin/ld.lld,ld.lld)
-LLD         ?= $(if $(wildcard /opt/homebrew/bin/lld),/opt/homebrew/bin/lld,lld)
-NASM        ?= $(if $(wildcard /opt/homebrew/bin/nasm),/opt/homebrew/bin/nasm,nasm)
-LLVM_OBJCOPY ?= $(if $(wildcard $(LLVM_PREFIX)/bin/llvm-objcopy),$(LLVM_PREFIX)/bin/llvm-objcopy,llvm-objcopy)
-MFORMAT     ?= $(if $(wildcard /opt/homebrew/bin/mformat),/opt/homebrew/bin/mformat,mformat)
-MCOPY       ?= $(if $(wildcard /opt/homebrew/bin/mcopy),/opt/homebrew/bin/mcopy,mcopy)
-MMD         ?= $(if $(wildcard /opt/homebrew/bin/mmd),/opt/homebrew/bin/mmd,mmd)
-QEMU        ?= $(if $(wildcard /opt/homebrew/bin/qemu-system-x86_64),/opt/homebrew/bin/qemu-system-x86_64,qemu-system-x86_64)
-OVMF        ?= $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/qemu/edk2-x86_64-code.fd))
-PYTHON      ?= python3
+CLANG ?= $(if $(wildcard $(LLVM_PREFIX)/bin/clang),$(LLVM_PREFIX)/bin/clang,clang)
+PYTHON ?= python3
+QEMU ?= qemu-system-x86_64
+OVMF ?=
+CPUS ?= 4
+MEMORY ?= 256M
+LEDGER_PORT ?=
+STATE_DISK ?= var/stratum-data.img
 
-BUILD_DIR   := build
-BIN_DIR     := bin
-IMAGE_DIR   := $(BUILD_DIR)/images
+export SOURCE_DATE_EPOCH := 1700000000
+export CLANG QEMU OVMF
 
-BOOT_LOADER := $(BUILD_DIR)/BOOTX64.EFI
-KERNEL_ELF  := $(BUILD_DIR)/stratum.elf
-INITRAMFS   := $(BUILD_DIR)/initramfs.cpio
-BOOT_DISK   := $(IMAGE_DIR)/stratum-boot.img
-DATA_DISK   := $(IMAGE_DIR)/stratum-data.img
+BUILD_DIR := build
+BOOT_DISK := $(BUILD_DIR)/images/stratum-boot.img
+DATA_DISK := $(BUILD_DIR)/images/stratum-data.img
 
-# Compiler and Linker Flags
-UEFI_CFLAGS := -target x86_64-unknown-windows -ffreestanding -fno-stack-protector \
-               -fshort-wchar -mno-red-zone -Wall -Wextra -std=c17 -O2 \
-               -Iinclude/boot -Iinclude/shared
+.PHONY: all bootstrap doctor build image run debug test smoke test-boot test-mm test-smp \
+        test-sched test-abi test-drivers test-storage test-net test-faults fuzz soak bench \
+        docs scope-check demo evidence acceptance verify release clean
 
-KERNEL_CFLAGS := -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone \
-                 -mcmodel=kernel -mno-mmx -mno-sse -fno-stack-protector \
-                 -fno-omit-frame-pointer -Wall -Wextra -std=c17 -O2 \
-                 -Iinclude/kernel -Iinclude/shared
+all: image
 
-KERNEL_LDFLAGS := -nostdlib -static -z max-page-size=0x1000 -T kernel/arch/x86_64/linker.ld
-
-USER_CFLAGS := -target x86_64-unknown-none-elf -ffreestanding -fno-stack-protector \
-               -fno-omit-frame-pointer -Wall -Wextra -std=c17 -O2 \
-               -Iinclude/user -Iinclude/shared
-
-USER_LDFLAGS := -nostdlib -static -z max-page-size=0x1000 -T user/lib/user.ld
-
-.PHONY: all bootstrap doctor build image run debug test test-boot test-mm test-smp \
-        test-abi test-storage test-net test-faults fuzz soak bench docs scope-check \
-        demo acceptance verify release clean
-
-all: build image
-
-bootstrap:
-	@echo "Checking and locating pinned dependencies..."
-	@$(PYTHON) scripts/doctor.py
+bootstrap: doctor
 
 doctor:
 	@$(PYTHON) scripts/doctor.py
 
 build:
-	@mkdir -p $(BUILD_DIR) $(BIN_DIR) $(IMAGE_DIR)
-	@$(MAKE) -f scripts/build_subsystems.mk build-all
+	@$(MAKE) -f scripts/build_subsystems.mk PYTHON="$(PYTHON)" build-all
 
 image: build
-	@mkdir -p $(IMAGE_DIR)
-	@$(PYTHON) scripts/build_image.py --boot-img $(BOOT_DISK) --data-img $(DATA_DISK) \
-		--loader $(BOOT_LOADER) --kernel $(KERNEL_ELF) --initramfs $(INITRAMFS)
+	@$(PYTHON) scripts/build_image.py --boot-img "$(BOOT_DISK)" --data-img "$(DATA_DISK)" \
+		--loader "$(BUILD_DIR)/BOOTX64.EFI" --kernel "$(BUILD_DIR)/stratum.elf" \
+		--initramfs "$(BUILD_DIR)/initramfs.cpio"
+
+VM_ARGS = --boot-img "$(BOOT_DISK)" --data-img "$(STATE_DISK)" --data-template "$(DATA_DISK)" \
+	--cpus "$(CPUS)" --mem "$(MEMORY)" $(if $(LEDGER_PORT),--ledger-port "$(LEDGER_PORT)")
 
 run: image
-	@$(PYTHON) scripts/run_vm.py --boot-img $(BOOT_DISK) --data-img $(DATA_DISK) \
-		--ovmf $(OVMF) --cpus 4 --mem 256M --serial stdio
+	@$(PYTHON) scripts/run_vm.py $(VM_ARGS)
 
 debug: image
-	@$(PYTHON) scripts/run_vm.py --boot-img $(BOOT_DISK) --data-img $(DATA_DISK) \
-		--ovmf $(OVMF) --cpus 4 --mem 256M --serial stdio --gdb 1234
+	@$(PYTHON) scripts/run_vm.py $(VM_ARGS) --gdb 1234
 
 test:
-	@$(PYTHON) scripts/run_tests.py --suite all_host
+	@$(PYTHON) scripts/run_tests.py
 
-test-boot:
-	@$(PYTHON) scripts/run_tests.py --suite boot
+smoke: image
+	@$(PYTHON) scripts/test_smoke.py
+	@$(PYTHON) scripts/test_recovery.py
+	@$(PYTHON) scripts/test_ledger.py
+	@$(PYTHON) scripts/test_replication.py
 
-test-mm:
-	@$(PYTHON) scripts/run_tests.py --suite mm
+test-boot: image
+	@$(PYTHON) scripts/test_boot.py
+	@$(PYTHON) scripts/test_smoke.py --matrix
 
-test-smp:
-	@$(PYTHON) scripts/run_tests.py --suite smp
+test-mm test-smp test-sched test-abi test-drivers test-faults: image
+	@$(PYTHON) scripts/test_diagnostics.py $(patsubst test-%,%,$@)
 
-test-sched:
-	@$(PYTHON) scripts/run_tests.py --suite sched
+test-storage: image
+	@$(PYTHON) scripts/test_diagnostics.py storage
+	@$(PYTHON) scripts/test_recovery.py
 
-test-abi:
-	@$(PYTHON) scripts/run_tests.py --suite abi
-
-test-storage:
-	@$(PYTHON) scripts/run_tests.py --suite storage
-
-test-net:
-	@$(PYTHON) scripts/run_tests.py --suite net
-
-test-faults:
-	@$(PYTHON) scripts/run_tests.py --suite faults
+test-net demo: image
+	@$(PYTHON) scripts/test_ledger.py
+	@$(PYTHON) scripts/test_replication.py
 
 fuzz:
 	@$(PYTHON) scripts/run_fuzz.py
 
-soak:
-	@$(PYTHON) scripts/run_soak.py
+soak: image
+	@$(PYTHON) scripts/test_diagnostics.py stress
 
 bench:
-	@$(PYTHON) scripts/run_bench.py
+	@$(PYTHON) scripts/run_benchmarks.py
 
 docs:
 	@$(PYTHON) scripts/check_docs.py
@@ -118,18 +85,16 @@ docs:
 scope-check:
 	@$(PYTHON) scripts/scope_check.py
 
-demo: image
-	@$(PYTHON) scripts/run_demo.py
+evidence:
+	@$(PYTHON) scripts/run_acceptance.py --smoke
 
 acceptance:
 	@$(PYTHON) scripts/run_acceptance.py
 
 verify:
-	@$(PYTHON) scripts/verify_evidence.py
+	@$(PYTHON) scripts/verify_evidence.py "$(EVIDENCE)"
 
-release: verify
-	@$(PYTHON) scripts/build_release.py
+release: acceptance
 
 clean:
-	@rm -rf $(BUILD_DIR) $(BIN_DIR)
-	@echo "Clean completed."
+	@rm -rf "$(BUILD_DIR)"

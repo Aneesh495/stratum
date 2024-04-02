@@ -44,7 +44,7 @@ typedef struct stratafs_sb {
     uint32_t mount_count;
     uint32_t clean_shutdown;
     uint32_t checksum;
-    uint8_t  padding[4008];
+    uint8_t  padding[4000];
 } __attribute__((packed)) stratafs_sb_t;
 
 typedef struct stratafs_disk_inode {
@@ -61,7 +61,8 @@ typedef struct stratafs_disk_inode {
     uint32_t indirect;
     uint32_t double_indirect;
     uint32_t flags;
-    uint32_t reserved[9];
+    uint32_t generation;
+    uint32_t reserved[4];
 } __attribute__((packed)) stratafs_disk_inode_t;
 
 typedef struct stratafs_disk_dirent {
@@ -77,6 +78,7 @@ typedef struct stratafs {
     stratafs_sb_t           sb;
     journal_t               journal;
     spinlock_t              lock;
+    uint32_t                open_count[2048];
     vfs_mount_t            *mount;
 } stratafs_t;
 
@@ -103,6 +105,5 @@ int64_t stratafs_write_file(stratafs_t *fs, journal_tx_t *tx, uint32_t ino, stra
 
 int  stratafs_dir_lookup(stratafs_t *fs, stratafs_disk_inode_t *dir, const char *name, uint32_t *out_ino);
 int  stratafs_dir_add(stratafs_t *fs, journal_tx_t *tx, uint32_t dir_ino, stratafs_disk_inode_t *dir, const char *name, uint32_t ino, uint8_t file_type);
-int  stratafs_dir_remove(stratafs_t *fs, journal_tx_t *tx, uint32_t dir_ino, stratafs_disk_inode_t *dir, const char *name);
 
 #endif /* STRATUM_KERNEL_STRATAFS_H */

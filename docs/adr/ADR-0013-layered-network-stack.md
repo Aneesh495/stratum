@@ -1,5 +1,7 @@
 # ADR-0013: Layered Network Stack and BSD Socket API
 
+Historical design record. See [verification status](../BUILD_STATUS.md) for the current implementation and open work.
+
 ## Status
 Accepted
 

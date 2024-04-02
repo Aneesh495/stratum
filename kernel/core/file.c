@@ -3,15 +3,21 @@
 #include <kernel/kernel.h>
 #include <kernel/string.h>
 #include <kernel/uart.h>
+#include <kernel/sched.h>
 #include <shared/errno.h>
 
 static kmem_cache_t *g_file_cache = NULL;
 
 static int64_t console_read(file_t *file, void *buf, size_t count) {
     (void)file;
-    (void)buf;
-    (void)count;
-    return 0; /* EOF for non-interactive early stdin */
+    if (count == 0) return 0;
+
+    int ch;
+    while ((ch = uart_getc_nonblocking()) < 0) {
+        thread_sleep_ms(10);
+    }
+    ((char *)buf)[0] = (char)ch;
+    return 1;
 }
 
 static int64_t console_write(file_t *file, const void *buf, size_t count) {
@@ -24,6 +30,7 @@ static int64_t console_write(file_t *file, const void *buf, size_t count) {
 static int console_poll(file_t *file, uint32_t events) {
     (void)file;
     int revents = 0;
+    if ((events & POLLIN) && uart_input_ready()) revents |= POLLIN;
     if (events & POLLOUT) {
         revents |= POLLOUT;
     }
@@ -188,7 +195,6 @@ int fd_dup2(fd_table_t *table, int oldfd, int newfd) {
         newfd < 0 || newfd >= PROCESS_MAX_FDS) {
         return -STRATUM_EBADF;
     }
-    if (oldfd == newfd) return newfd;
 
     uint64_t flags;
     spin_lock_irqsave(&table->lock, &flags);
@@ -197,6 +203,11 @@ int fd_dup2(fd_table_t *table, int oldfd, int newfd) {
     if (!src) {
         spin_unlock_irqrestore(&table->lock, flags);
         return -STRATUM_EBADF;
+    }
+
+    if (oldfd == newfd) {
+        spin_unlock_irqrestore(&table->lock, flags);
+        return newfd;
     }
 
     file_ref(src);

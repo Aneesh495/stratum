@@ -63,6 +63,14 @@ process_t *process_create_init(user_program_t *prog) {
     file_t *c0 = file_create_console();
     file_t *c1 = file_create_console();
     file_t *c2 = file_create_console();
+    if (!c0 || !c1 || !c2) {
+        file_close(c0);
+        file_close(c1);
+        file_close(c2);
+        proc->state = PROC_STATE_UNUSED;
+        spin_unlock_irqrestore(&g_process_lock, flags);
+        return NULL;
+    }
     fd_install(&proc->fds, 0, c0);
     fd_install(&proc->fds, 1, c1);
     fd_install(&proc->fds, 2, c2);
@@ -70,18 +78,20 @@ process_t *process_create_init(user_program_t *prog) {
     spin_unlock_irqrestore(&g_process_lock, flags);
 
     thread_t *t = thread_create_user("init", user_process_starter, prog,
-                                      THREAD_PRIO_NORMAL, prog->address_space);
-    if (!t) return NULL;
-    t->process = proc;
-    proc->main_thread = t;
+                                      THREAD_PRIO_NORMAL, prog->address_space, proc);
+    if (!t) {
+        fd_table_destroy(&proc->fds);
+        proc->state = PROC_STATE_UNUSED;
+        return NULL;
+    }
 
     return proc;
 }
 
 static void fork_child_entry(void *arg) {
-    syscall_regs_t *kregs = (syscall_regs_t *)arg;
-    kregs->rax = 0; /* Child process returns 0 from fork */
-    user_enter_regs(kregs);
+    syscall_regs_t regs = *(syscall_regs_t *)arg;
+    kfree(arg);
+    user_enter_regs(&regs);
 }
 
 int32_t process_fork(syscall_regs_t *regs) {
@@ -126,83 +136,61 @@ int32_t process_fork(syscall_regs_t *regs) {
     /* Duplicate file descriptors */
     fd_table_copy(&child->fds, &parent->fds);
 
-    /* Link child into parent's hierarchy */
-    child->next_sibling = parent->children;
-    parent->children = child;
-
-    spin_unlock_irqrestore(&g_process_lock, flags);
-
-    /* Allocate copy of register frame for child thread */
-    syscall_regs_t *child_regs = (syscall_regs_t *)kmalloc(sizeof(syscall_regs_t));
-    if (!child_regs) {
-        return -STRATUM_ENOMEM;
-    }
-    memcpy(child_regs, regs, sizeof(syscall_regs_t));
-    child_regs->rax = 0;
-
-    /* Create child execution thread */
-    thread_t *ct = thread_create_user(child->name, fork_child_entry, child_regs,
-                                      THREAD_PRIO_NORMAL, child->address_space);
-    if (!ct) {
+    syscall_regs_t *child_regs = kmalloc(sizeof(*child_regs));
+    if (child_regs) {
+        *child_regs = *regs;
+        child_regs->rax = 0;
+        if (thread_create_user(child->name, fork_child_entry, child_regs,
+                               THREAD_PRIO_NORMAL, child->address_space, child)) {
+            child->next_sibling = parent->children;
+            parent->children = child;
+            int32_t pid = (int32_t)child->pid;
+            spin_unlock_irqrestore(&g_process_lock, flags);
+            return pid;
+        }
         kfree(child_regs);
-        return -STRATUM_ENOMEM;
     }
-    ct->process = child;
-    child->main_thread = ct;
-
-    return (int32_t)child->pid;
+    fd_table_destroy(&child->fds);
+    vmm_destroy_address_space(child->address_space);
+    child->state = PROC_STATE_UNUSED;
+    spin_unlock_irqrestore(&g_process_lock, flags);
+    return -STRATUM_ENOMEM;
 }
 
 void process_exit(int status) {
     process_t *proc = process_get_current();
-    if (!proc) {
-        thread_exit();
-        while (1) {
-            __asm__ volatile("hlt");
-        }
+    if (proc) {
+        proc->exit_code = status;
+        fd_table_destroy(&proc->fds);
     }
+    thread_exit();
+    __builtin_unreachable();
+}
 
+void process_finish_exit(process_t *proc) {
+    /* The outgoing thread's stack and page tables are no longer active. */
     uint64_t flags;
     spin_lock_irqsave(&g_process_lock, &flags);
+    vmm_destroy_address_space(proc->address_space);
+    proc->address_space = NULL;
+    proc->main_thread = NULL;
 
-    proc->exit_code = status;
-    proc->state = PROC_STATE_ZOMBIE;
-
-    /* Destroy file descriptors */
-    fd_table_destroy(&proc->fds);
-
-    /* Reparent orphan children to PID 1 */
     process_t *init = &g_process_pool[0];
-    if (proc != init && proc->children) {
-        process_t *c = proc->children;
-        while (c) {
-            c->parent = init;
-            process_t *next = c->next_sibling;
-            c->next_sibling = init->children;
-            init->children = c;
-            c = next;
-        }
-        proc->children = NULL;
+    while (proc != init && proc->children) {
+        process_t *child = proc->children;
+        proc->children = child->next_sibling;
+        child->parent = init;
+        child->ppid = init->pid;
+        child->next_sibling = init->children;
+        init->children = child;
     }
-
-    /* Wake parent */
-    if (proc->parent) {
-        wait_queue_wake_all(&proc->parent->wait_child);
+    proc->state = PROC_STATE_ZOMBIE;
+    if (proc->parent) wait_queue_wake_all(&proc->parent->wait_child);
+    if (proc == init) {
+        g_user_exit_code = proc->exit_code;
+        __atomic_store_n(&g_user_init_finished, true, __ATOMIC_RELEASE);
     }
-
-    /* If PID 1 exited, signal test completion */
-    if (proc->pid == 1) {
-        g_user_exit_code = status;
-        g_user_init_finished = true;
-        smp_send_ipi(g_cpus[0].lapic_id, VEC_IPI_RESCHED);
-    }
-
     spin_unlock_irqrestore(&g_process_lock, flags);
-
-    thread_exit();
-    while (1) {
-        __asm__ volatile("hlt");
-    }
 }
 
 int32_t process_waitpid(int32_t pid, int *status, int options) {
@@ -226,6 +214,11 @@ int32_t process_waitpid(int32_t pid, int *status, int options) {
                     int exit_val = cur->exit_code;
                     uint32_t reaped_pid = cur->pid;
 
+                    if (status && copy_to_user(status, &exit_val, sizeof(exit_val)) != 0) {
+                        spin_unlock_irqrestore(&g_process_lock, flags);
+                        return -STRATUM_EFAULT;
+                    }
+
                     /* Unlink from parent */
                     if (prev) {
                         prev->next_sibling = cur->next_sibling;
@@ -233,18 +226,8 @@ int32_t process_waitpid(int32_t pid, int *status, int options) {
                         parent->children = cur->next_sibling;
                     }
 
-                    cur->state = PROC_STATE_DEAD;
-                    if (cur->address_space) {
-                        vmm_destroy_address_space(cur->address_space);
-                        cur->address_space = NULL;
-                    }
                     cur->state = PROC_STATE_UNUSED;
-
                     spin_unlock_irqrestore(&g_process_lock, flags);
-
-                    if (status) {
-                        copy_to_user(status, &exit_val, sizeof(int));
-                    }
                     return (int32_t)reaped_pid;
                 }
             }
@@ -262,9 +245,6 @@ int32_t process_waitpid(int32_t pid, int *status, int options) {
             return 0;
         }
 
-        spin_unlock_irqrestore(&g_process_lock, flags);
-
-        /* Wait for child state change */
-        wait_queue_wait(&parent->wait_child);
+        wait_queue_wait_locked(&parent->wait_child, &g_process_lock, flags);
     }
 }

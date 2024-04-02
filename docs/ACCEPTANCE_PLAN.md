@@ -1,10 +1,10 @@
 # Stratum Acceptance Plan and Capability Register
 
 Version: 1.0.0
-Status: Frozen
+Status: Frozen targets. See [verification status](BUILD_STATUS.md) for observed coverage.
 
 ## 1. Overview
-This document freezes the 64 capability families (K01 to K64) and the 12 fixed acceptance gates (A01 to A12) required for complete system verification.
+This document freezes the 64 capability families (K01 to K64) and the 12 fixed acceptance gates (A01 to A12) required for complete system verification. Source paths in the register describe intended subsystem ownership and can include files still to be implemented.
 
 ## 2. Capability Register (K01 to K64)
 

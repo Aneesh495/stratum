@@ -1,6 +1,0 @@
-Running P04 Memory Management Acceptance Suite (Gate A02)
-=========================================================
-Testing Host MM Reference & Accounting Model (2,000,000 ops)... [PASS]
-Testing Guest Memory (PMM, SLAB, VMM 4-Level Paging)... [PASS]
-
-All P04 Memory Acceptance Tests Passed.

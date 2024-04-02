@@ -39,9 +39,6 @@ void uart_init(void) {
     /* Auxiliary Output 2 set (enables IRQ line on hardware), RTS/DTR set */
     outb(COM1_PORT + UART_MCR, 0x0B);
 
-    /* Enable Received Data Available Interrupt */
-    outb(COM1_PORT + UART_IER, 0x01);
-
     uart_initialized = true;
 }
 
@@ -79,11 +76,15 @@ void uart_puts(const char *s) {
     }
 }
 
+bool uart_input_ready(void) {
+    return (inb(COM1_PORT + UART_LSR) & UART_LSR_DR) != 0;
+}
+
 int uart_getc_nonblocking(void) {
     if (!uart_initialized) {
         uart_init();
     }
-    if (inb(COM1_PORT + UART_LSR) & UART_LSR_DR) {
+    if (uart_input_ready()) {
         return (int)inb(COM1_PORT + UART_RBR);
     }
     return -1;
