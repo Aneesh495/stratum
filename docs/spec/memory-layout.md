@@ -13,5 +13,7 @@ ends at `0x00007ffffffff000` with an unmapped page below it.
 `fork` retains shared user pages and clears write permission on writable
 mappings. A write fault either copies the page or restores write permission
 when only one reference remains. An unhandled Ring 3 fault terminates the
-process. The current ABI has one runnable thread per address space. Anonymous
-demand paging, shared mappings, and guarded kernel stacks remain open.
+process. The current ABI has one runnable thread per address space. Anonymous mappings are
+demand-zero, non-executable, and limited to 16 MiB per region. Protection and
+unmap operations apply to complete regions. Shared mappings, file-backed
+mappings, and guarded kernel stacks remain open.

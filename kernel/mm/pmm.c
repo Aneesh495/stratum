@@ -1,4 +1,5 @@
 #include <kernel/pmm.h>
+#include <kernel/spinlock.h>
 #include <kernel/kernel.h>
 #include <kernel/string.h>
 
@@ -8,6 +9,7 @@
 uint64_t g_kernel_phys_base = 0;
 
 static uint64_t g_page_bitmap[BITMAP_WORDS];
+static spinlock_t pmm_lock = SPINLOCK_INIT;
 static page_t  *g_pages = NULL;
 static uint64_t g_num_pages = 0;
 
@@ -77,7 +79,9 @@ void pmm_init(const boot_handoff_t *handoff) {
     uint64_t array_phys = 0;
     for (uint32_t i = 0; i < handoff->mem_map_entries; i++) {
         if (descs[i].type == BOOT_MEM_USABLE) {
-            if (descs[i].phys_addr >= 0x100000 && (descs[i].page_count * PAGE_SIZE) >= array_bytes && array_phys == 0) {
+            if (descs[i].phys_addr >= 0x100000 && descs[i].phys_addr < STRATUM_BOOT_PHYS_LIMIT &&
+                array_bytes <= STRATUM_BOOT_PHYS_LIMIT - descs[i].phys_addr &&
+                descs[i].page_count * PAGE_SIZE >= array_bytes) {
                 array_phys = descs[i].phys_addr;
                 break;
             }
@@ -85,8 +89,7 @@ void pmm_init(const boot_handoff_t *handoff) {
     }
 
     if (array_phys == 0) {
-        kprintf("[PMM] FATAL: Cannot find physical memory for page tables array!\n");
-        return;
+        panic("Cannot reserve physical memory for page allocator metadata.");
     }
 
     g_pages = (page_t *)phys_to_virt(array_phys);
@@ -138,98 +141,79 @@ void pmm_init(const boot_handoff_t *handoff) {
             g_free_pages * PAGE_SIZE / (1024 * 1024), g_free_pages);
 }
 
-uint64_t pmm_alloc_page(void) {
-    for (uint64_t pfn = 0; pfn < g_num_pages; pfn++) {
-        if (!bitmap_test(pfn)) {
-            bitmap_set(pfn);
-            g_pages[pfn].flags = PAGE_FLAG_USER;
-            g_pages[pfn].refcount = 1;
-            g_pages[pfn].order = 0;
-            g_free_pages--;
-            g_used_pages++;
-
-            uint64_t paddr = pfn * PAGE_SIZE;
-            /* Zero out the allocated physical page via direct map */
-            void *vaddr = phys_to_virt(paddr);
-            memset(vaddr, 0, PAGE_SIZE);
-
-            return paddr;
-        }
-    }
-    kprintf("[PMM] WARNING: Physical memory exhausted!\n");
-    return 0;
-}
-
 uint64_t pmm_alloc_pages(uint32_t order) {
+    if (order >= 21) return 0;
     uint64_t count = 1ULL << order;
-    if (count == 1) return pmm_alloc_page();
-
+    uint64_t flags;
+    spin_lock_irqsave(&pmm_lock, &flags);
+    uint64_t result = 0;
     for (uint64_t pfn = 0; pfn + count <= g_num_pages; pfn += count) {
-        bool free = true;
-        for (uint64_t i = 0; i < count; i++) {
-            if (bitmap_test(pfn + i)) {
-                free = false;
-                break;
-            }
+        uint64_t i = 0;
+        while (i < count && !bitmap_test(pfn + i)) i++;
+        if (i != count) continue;
+        for (i = 0; i < count; i++) {
+            bitmap_set(pfn + i);
+            g_pages[pfn + i].flags = PAGE_FLAG_USER;
+            g_pages[pfn + i].refcount = 1;
+            g_pages[pfn + i].order = order;
         }
-
-        if (free) {
-            for (uint64_t i = 0; i < count; i++) {
-                bitmap_set(pfn + i);
-                g_pages[pfn + i].flags = PAGE_FLAG_USER;
-                g_pages[pfn + i].refcount = 1;
-                g_pages[pfn + i].order = order;
-                g_free_pages--;
-                g_used_pages++;
-            }
-
-            uint64_t paddr = pfn * PAGE_SIZE;
-            void *vaddr = phys_to_virt(paddr);
-            memset(vaddr, 0, count * PAGE_SIZE);
-
-            return paddr;
-        }
+        g_free_pages -= count;
+        g_used_pages += count;
+        result = pfn * PAGE_SIZE;
+        break;
     }
+    spin_unlock_irqrestore(&pmm_lock, flags);
 
-    return 0;
+    /* Ownership is exclusive after marking the pages allocated. */
+    if (result) memset(phys_to_virt(result), 0, count * PAGE_SIZE);
+    return result;
 }
 
-void pmm_free_page(uint64_t paddr) {
-    if (paddr >= g_max_phys_addr || (paddr & (PAGE_SIZE - 1)) != 0) {
-        kprintf("[PMM] ERROR: Invalid physical page free at 0x%lx\n", paddr);
-        return;
-    }
+uint64_t pmm_alloc_page(void) {
+    return pmm_alloc_pages(0);
+}
 
-    uint64_t pfn = paddr / PAGE_SIZE;
-    if (pfn >= g_num_pages || !bitmap_test(pfn)) {
-        kprintf("[PMM] ERROR: Double free detected on page 0x%lx (pfn=%lu)\n", paddr, pfn);
-        return;
-    }
-
-    uint32_t prev = __sync_fetch_and_sub(&g_pages[pfn].refcount, 1);
-    if (prev > 1) {
-        return;
-    }
-
-    g_pages[pfn].refcount = 0;
-    g_pages[pfn].flags = PAGE_FLAG_FREE;
-    bitmap_clear(pfn);
-    g_free_pages++;
-    if (g_used_pages > 0) g_used_pages--;
+static bool allocated_page(uint64_t pfn) {
+    return pfn < g_num_pages && g_pages[pfn].flags == PAGE_FLAG_USER &&
+        g_pages[pfn].refcount > 0;
 }
 
 void pmm_free_pages(uint64_t paddr, uint32_t order) {
+    if ((paddr & (PAGE_SIZE - 1)) || order >= 21) return;
+    uint64_t pfn = paddr / PAGE_SIZE;
     uint64_t count = 1ULL << order;
+    uint64_t flags;
+    spin_lock_irqsave(&pmm_lock, &flags);
     for (uint64_t i = 0; i < count; i++) {
-        pmm_free_page(paddr + i * PAGE_SIZE);
+        if (!allocated_page(pfn + i) || g_pages[pfn + i].order != order) {
+            spin_unlock_irqrestore(&pmm_lock, flags);
+            kprintf("[PMM] Invalid release at 0x%lx (order %u).\n", paddr, order);
+            return;
+        }
     }
+    for (uint64_t i = 0; i < count; i++) {
+        page_t *page = &g_pages[pfn + i];
+        if (--page->refcount == 0) {
+            page->flags = PAGE_FLAG_FREE;
+            bitmap_clear(pfn + i);
+            g_free_pages++;
+            g_used_pages--;
+        }
+    }
+    spin_unlock_irqrestore(&pmm_lock, flags);
+}
+
+void pmm_free_page(uint64_t paddr) {
+    pmm_free_pages(paddr, 0);
 }
 
 void pmm_page_retain(uint64_t paddr) {
     uint64_t pfn = paddr / PAGE_SIZE;
-    if (pfn < g_num_pages && g_pages) {
-        __sync_fetch_and_add(&g_pages[pfn].refcount, 1);
-    }
+    uint64_t flags;
+    spin_lock_irqsave(&pmm_lock, &flags);
+    kassert(allocated_page(pfn) && g_pages[pfn].refcount < (uint32_t)-1);
+    g_pages[pfn].refcount++;
+    spin_unlock_irqrestore(&pmm_lock, flags);
 }
 
 void pmm_page_release(uint64_t paddr) {
@@ -238,10 +222,11 @@ void pmm_page_release(uint64_t paddr) {
 
 uint32_t pmm_page_refcount(uint64_t paddr) {
     uint64_t pfn = paddr / PAGE_SIZE;
-    if (pfn < g_num_pages && g_pages) {
-        return g_pages[pfn].refcount;
-    }
-    return 0;
+    uint64_t flags;
+    spin_lock_irqsave(&pmm_lock, &flags);
+    uint32_t count = allocated_page(pfn) ? g_pages[pfn].refcount : 0;
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return count;
 }
 
 uint64_t pmm_get_total_pages(void) {
@@ -249,9 +234,17 @@ uint64_t pmm_get_total_pages(void) {
 }
 
 uint64_t pmm_get_free_pages(void) {
-    return g_free_pages;
+    uint64_t flags;
+    spin_lock_irqsave(&pmm_lock, &flags);
+    uint64_t pages = g_free_pages;
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return pages;
 }
 
 uint64_t pmm_get_used_pages(void) {
-    return g_used_pages;
+    uint64_t flags;
+    spin_lock_irqsave(&pmm_lock, &flags);
+    uint64_t pages = g_used_pages;
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return pages;
 }

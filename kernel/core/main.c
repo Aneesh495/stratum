@@ -84,6 +84,15 @@ static spinlock_t g_sched_test_lock = SPINLOCK_INIT;
 static void worker_priority(void *arg) {
     uint64_t id = (uint64_t)arg;
     for (int i = 0; i < 5; i++) {
+        uint64_t *buffer = kmalloc(64);
+        uint64_t *large = kmalloc(4096);
+        kassert(buffer && large);
+        buffer[0] = id * 100 + i;
+        large[511] = buffer[0];
+        thread_yield();
+        kassert(buffer[0] == id * 100 + i && large[511] == buffer[0]);
+        kfree(large);
+        kfree(buffer);
         uint64_t flags;
         spin_lock_irqsave(&g_sched_test_lock, &flags);
         g_thread_test_counter++;
@@ -194,7 +203,7 @@ void kmain(boot_handoff_t *handoff, uint64_t magic) {
     mutex_unlock(&test_mtx);
 
     /* Broadcast cross-CPU TLB shootdown IPI */
-    smp_tlb_shootdown(0);
+    kassert(smp_tlb_shootdown(0) == 0);
 
     kprintf("[TEST] P05 SMP synchronization verification passed successfully.\n");
 

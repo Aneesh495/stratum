@@ -19,10 +19,14 @@
 /* ------------------------------------------------------------- */
 /* 1. Allocation Failure Injection Simulation                    */
 /* ------------------------------------------------------------- */
+static int g_alloc_fail_countdown = -1;
 
 static void *faulty_malloc(size_t size) {
+    if (g_alloc_fail_countdown == 0) {
         return NULL;
     }
+    if (g_alloc_fail_countdown > 0) {
+        g_alloc_fail_countdown--;
     }
     return malloc(size);
 }
@@ -70,6 +74,7 @@ static void test_alloc_fault_injection(void) {
     uint32_t clean_failures = 0;
 
     for (int step = 0; step < 4; step++) {
+        g_alloc_fail_countdown = step;
         test_obj_t *obj = NULL;
         int res = construct_multi_buffer_obj(&obj);
         if (res == 0) {

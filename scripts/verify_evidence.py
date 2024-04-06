@@ -73,7 +73,8 @@ def verify(root):
               "durable-alpha\ndurable-beta\n" in reboot and "err=-2" in reboot, f"{name}: shell or recovery mismatch")
     for cpus in (1, 2, 4, 8):
         log = read(f"transcripts/diagnostics/stress-{cpus}.log")
-        check("64 fork/reap cycles" in log and "Guest stress smoke completed" in log,
+        check("64 fork/reap cycles" in log and "128 demand-zero pages" in log and
+              "Guest stress smoke completed" in log,
               f"{cpus} CPUs: missing ABI or stress observation")
     check("Invalid Opcode (#UD)" in read("transcripts/diagnostics/faults-2.log"), "missing kernel fault diagnostic")
     check("WAL published before home writes." in read("transcripts/recovery/interrupted.log") and

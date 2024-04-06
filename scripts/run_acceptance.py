@@ -94,7 +94,10 @@ def main():
     }
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"Regression evidence: {dest.relative_to(Path.cwd())}", flush=True)
-    return subprocess.run([sys.executable, "scripts/verify_evidence.py", str(dest)], timeout=120).returncode
+    result = subprocess.run([sys.executable, "scripts/verify_evidence.py", str(dest)], timeout=120)
+    if result.returncode:
+        return result.returncode
+    return subprocess.run([sys.executable, "scripts/test_evidence.py", str(dest)], timeout=120).returncode
 
 
 if __name__ == "__main__":

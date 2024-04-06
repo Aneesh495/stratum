@@ -145,8 +145,8 @@ void gdt_init_ap(struct cpu *cpu) {
 
     /* Setup AP TSS */
     cpu->tss.rsp0 = cpu->kernel_stack_top;
-    cpu->tss.ist1 = (uint64_t)&g_double_fault_stack[sizeof(g_double_fault_stack)];
-    cpu->tss.ist2 = (uint64_t)&g_nmi_stack[sizeof(g_nmi_stack)];
+    cpu->tss.ist1 = cpu->kernel_stack_top + 8192;
+    cpu->tss.ist2 = cpu->kernel_stack_top + 16384;
     cpu->tss.iopb_offset = sizeof(tss_t);
 
     /* Entry 5 & 6 (0x28): TSS descriptor (16 bytes) */

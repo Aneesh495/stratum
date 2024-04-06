@@ -180,6 +180,34 @@ int main(int argc, char **argv) {
     }
     if (syscall1(SYS_thread_self, 0) != -STRATUM_ENOSYS) return 14;
     print("[USER] 64 fork/reap cycles, COW, invalid status pointer and Ring 3 fault isolation verified.\n");
+    const size_t length = 128 * 4096;
+    int64_t mapped = mmap_anonymous(length, PROT_READ | PROT_WRITE);
+    if (mapped < 0) return 15;
+    volatile char *pages = (volatile char *)mapped;
+    for (size_t page = 0; page < length; page += 4096) {
+        if (pages[page] != 0) return 16;
+        pages[page] = 'a';
+    }
+    if (mprotect((void *)pages, length, PROT_READ) != 0) return 17;
+    int writer = fork();
+    if (writer < 0) return 18;
+    if (writer == 0) {
+        if (mprotect((void *)pages, length, PROT_READ | PROT_WRITE) != 0) exit(99);
+        pages[0] = 'b';
+        exit(pages[0] == 'b' ? 0 : 99);
+    }
+    int status;
+    if (waitpid(writer, &status, 0) != writer || status != 0 || pages[0] != 'a') return 19;
+
+    writer = fork();
+    if (writer < 0) return 20;
+    if (writer == 0) {
+        pages[0] = 'c';
+        exit(99);
+    }
+    if (waitpid(writer, &status, 0) != writer || status != 142) return 21;
+    if (munmap((void *)pages, length) != 0 || munmap((void *)pages, length) != -STRATUM_EINVAL) return 22;
+    print("[USER] 128 demand-zero pages, mapping protections, and anonymous COW verified.\n");
     print("[USER] ABI and IPC smoke checks complete.\n");
     return 42;
 }

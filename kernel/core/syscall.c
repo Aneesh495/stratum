@@ -408,6 +408,17 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
         return process_waitpid(pid, status, options);
     }
 
+    case SYS_mmap:
+        if (regs->rdi || regs->r10 != (MAP_PRIVATE | MAP_ANONYMOUS) ||
+            regs->r8 != (uint64_t)-1 || regs->r9) return -STRATUM_EINVAL;
+        return user_map_anonymous(process_get_current(), regs->rsi, (unsigned)regs->rdx);
+
+    case SYS_munmap:
+        return user_unmap(process_get_current(), regs->rdi, regs->rsi);
+
+    case SYS_mprotect:
+        return user_protect(process_get_current(), regs->rdi, regs->rsi, (unsigned)regs->rdx);
+
     case SYS_getpid: {
         process_t *p = process_get_current();
         return p ? (int64_t)p->pid : 1;

@@ -29,6 +29,7 @@ KERNEL_CSRCS := kernel/core/string.c \
                 kernel/mm/pmm.c \
                 kernel/mm/slab.c \
                 kernel/mm/vmm.c \
+                kernel/mm/anonymous.c \
                 kernel/sync/spinlock.c \
                 kernel/sync/mutex.c \
                 kernel/drivers/uart.c \

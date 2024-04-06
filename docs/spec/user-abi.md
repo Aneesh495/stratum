@@ -12,10 +12,10 @@ Stratum errno values. `RCX` and `R11` are clobbered. Use
 [syscall_nums.h](../../include/shared/syscall_nums.h) for the number registry.
 
 The dispatcher supports exit, fork, waitpid, getpid, file descriptors and
-pipes, poll, basic filesystem operations, sockets, uptime, sleep, trace events,
+pipes, poll, anonymous mapping and protection, basic filesystem operations, sockets, uptime, sleep, trace events,
 and sysinfo. Reserved calls return `ENOSYS`. Ring 3 faults exit with
 `128 + vector`. If `waitpid` cannot copy the exit status to the caller,
 it returns `EFAULT` and the child remains available to reap.
 
 The kernel starts the embedded native init binary. General exec, native user
-threads, TLS setup, and memory-mapping syscalls are pending.
+threads, TLS setup, and file-backed mapping are pending.

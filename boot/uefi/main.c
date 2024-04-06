@@ -3,7 +3,6 @@
 #include <shared/boot_info.h>
 
 #define PAGE_SIZE 4096
-#define MAX_MEM_DESCS 512
 
 /* Page Table Entry Flags */
 #define PTE_PRESENT   (1ULL << 0)
@@ -43,16 +42,21 @@ static void efi_zero(void *dest, uint64_t bytes) {
     }
 }
 
+static EFI_STATUS allocate_boot_pages(EFI_BOOT_SERVICES *bs, uint64_t pages, uint64_t *address) {
+    *address = STRATUM_BOOT_PHYS_LIMIT - 1;
+    return bs->AllocatePages(AllocateMaxAddress, EfiLoaderData, pages, address);
+}
+
 /* Construct 4-level page tables that map identity 0..4GB and high kernel */
 static uint64_t setup_boot_page_tables(EFI_BOOT_SERVICES *bs, uint64_t kernel_phys_base, uint64_t kernel_virt_base, uint64_t kernel_pages) {
     uint64_t pml4_phys = 0;
-    EFI_STATUS st = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &pml4_phys);
+    EFI_STATUS st = allocate_boot_pages(bs, 1, &pml4_phys);
     if (st != EFI_SUCCESS) return 0;
     efi_zero((void *)pml4_phys, PAGE_SIZE);
 
     /* 1. Identity Map first 4 GiB using 2 MiB large pages (PML4[0]) */
     uint64_t id_pdpt_phys = 0;
-    st = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &id_pdpt_phys);
+    st = allocate_boot_pages(bs, 1, &id_pdpt_phys);
     if (st != EFI_SUCCESS) return 0;
     efi_zero((void *)id_pdpt_phys, PAGE_SIZE);
 
@@ -65,7 +69,7 @@ static uint64_t setup_boot_page_tables(EFI_BOOT_SERVICES *bs, uint64_t kernel_ph
     uint64_t *id_pdpt = (uint64_t *)id_pdpt_phys;
     for (uint64_t g = 0; g < 4; g++) {
         uint64_t pd_phys = 0;
-        st = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &pd_phys);
+        st = allocate_boot_pages(bs, 1, &pd_phys);
         if (st != EFI_SUCCESS) return 0;
         efi_zero((void *)pd_phys, PAGE_SIZE);
 
@@ -85,14 +89,14 @@ static uint64_t setup_boot_page_tables(EFI_BOOT_SERVICES *bs, uint64_t kernel_ph
        PD index   = (0xFFFFFFFF80000000 >> 21) & 0x1FF = 0
     */
     uint64_t high_pdpt_phys = 0;
-    st = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &high_pdpt_phys);
+    st = allocate_boot_pages(bs, 1, &high_pdpt_phys);
     if (st != EFI_SUCCESS) return 0;
     efi_zero((void *)high_pdpt_phys, PAGE_SIZE);
 
     pml4[511] = high_pdpt_phys | PTE_PRESENT | PTE_WRITABLE;
 
     uint64_t high_pd_phys = 0;
-    st = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &high_pd_phys);
+    st = allocate_boot_pages(bs, 1, &high_pd_phys);
     if (st != EFI_SUCCESS) return 0;
     efi_zero((void *)high_pd_phys, PAGE_SIZE);
 
@@ -104,7 +108,7 @@ static uint64_t setup_boot_page_tables(EFI_BOOT_SERVICES *bs, uint64_t kernel_ph
     uint64_t pt_count = (kernel_pages + 511) / 512;
     for (uint64_t pti = 0; pti < pt_count; pti++) {
         uint64_t pt_phys = 0;
-        st = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &pt_phys);
+        st = allocate_boot_pages(bs, 1, &pt_phys);
         if (st != EFI_SUCCESS) return 0;
         efi_zero((void *)pt_phys, PAGE_SIZE);
 
@@ -136,7 +140,7 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     /* 1. Allocate Handoff Structure */
     uint64_t handoff_phys = 0;
-    EFI_STATUS st = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &handoff_phys);
+    EFI_STATUS st = allocate_boot_pages(bs, 1, &handoff_phys);
     if (st != EFI_SUCCESS) {
         efi_print(con, "ERROR: Failed to allocate boot handoff memory.\n");
         return st;
@@ -230,15 +234,21 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
         if (st == EFI_SUCCESS) {
             EFI_FILE_INFO *finfo = (EFI_FILE_INFO *)info_buf;
             uint64_t ramfs_size = finfo->FileSize;
-            uint64_t ramfs_pages = (ramfs_size + PAGE_SIZE - 1) / PAGE_SIZE;
-            uint64_t ramfs_phys = 0;
-            st = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, ramfs_pages, &ramfs_phys);
-            if (st == EFI_SUCCESS) {
-                uint64_t read_ramfs = ramfs_size;
-                initramfs_file->Read(initramfs_file, &read_ramfs, (void *)ramfs_phys);
-                handoff->initramfs_phys = ramfs_phys;
-                handoff->initramfs_size = ramfs_size;
-                efi_print(con, "Loaded initramfs archive.\n");
+            if (ramfs_size && ramfs_size <= 32 * 1024 * 1024) {
+                uint64_t ramfs_pages = (ramfs_size + PAGE_SIZE - 1) / PAGE_SIZE;
+                uint64_t ramfs_phys;
+                st = allocate_boot_pages(bs, ramfs_pages, &ramfs_phys);
+                if (st == EFI_SUCCESS) {
+                    uint64_t read_ramfs = ramfs_size;
+                    st = initramfs_file->Read(initramfs_file, &read_ramfs, (void *)ramfs_phys);
+                    if (st == EFI_SUCCESS && read_ramfs == ramfs_size) {
+                        handoff->initramfs_phys = ramfs_phys;
+                        handoff->initramfs_size = ramfs_size;
+                        efi_print(con, "Loaded initramfs archive.\n");
+                    } else {
+                        bs->FreePages(ramfs_phys, ramfs_pages);
+                    }
+                }
             }
         }
         initramfs_file->Close(initramfs_file);
@@ -250,17 +260,23 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     st = root_dir->Open(root_dir, &cmd_file, cmd_path, EFI_FILE_MODE_READ, EFI_FILE_READ_ONLY);
     if (st == EFI_SUCCESS) {
         uint64_t cmd_read = sizeof(handoff->cmdline) - 1;
-        cmd_file->Read(cmd_file, &cmd_read, handoff->cmdline);
-        handoff->cmdline[cmd_read] = '\0';
+        st = cmd_file->Read(cmd_file, &cmd_read, handoff->cmdline);
         cmd_file->Close(cmd_file);
-        efi_print(con, "Loaded boot command line.\n");
+        if (st == EFI_SUCCESS && cmd_read < sizeof(handoff->cmdline)) {
+            handoff->cmdline[cmd_read] = '\0';
+            efi_print(con, "Loaded boot command line.\n");
+        } else {
+            handoff->cmdline[0] = '\0';
+        }
     }
     root_dir->Close(root_dir);
 
     /* 5. Graphics Output Protocol (GOP) */
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
     st = bs->LocateProtocol(&EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, NULL, (void **)&gop);
-    if (st == EFI_SUCCESS && gop && gop->Mode && gop->Mode->Info) {
+    if (st == EFI_SUCCESS && gop && gop->Mode && gop->Mode->Info &&
+        (gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor ||
+         gop->Mode->Info->PixelFormat == PixelRedGreenBlueReserved8BitPerColor)) {
         handoff->fb_base_phys = gop->Mode->FrameBufferBase;
         handoff->fb_width = gop->Mode->Info->HorizontalResolution;
         handoff->fb_height = gop->Mode->Info->VerticalResolution;
@@ -287,7 +303,7 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     /* 8. Allocate Boot Memory Map Descriptors */
     uint64_t boot_mem_descs_phys = 0;
-    st = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, (MAX_MEM_DESCS * sizeof(boot_mem_desc_t) + PAGE_SIZE - 1) / PAGE_SIZE, &boot_mem_descs_phys);
+    st = allocate_boot_pages(bs, (STRATUM_BOOT_MAX_DESCS * sizeof(boot_mem_desc_t) + PAGE_SIZE - 1) / PAGE_SIZE, &boot_mem_descs_phys);
     if (st != EFI_SUCCESS) {
         return st;
     }
@@ -295,7 +311,7 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     /* Allocate Boot Stack (64 KiB) */
     uint64_t boot_stack_phys = 0;
-    st = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, 16, &boot_stack_phys);
+    st = allocate_boot_pages(bs, 16, &boot_stack_phys);
     if (st != EFI_SUCCESS) {
         return st;
     }
@@ -312,18 +328,22 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     /* Query size first */
     bs->GetMemoryMap(&mem_map_size, NULL, &map_key, &desc_size, &desc_version);
-    mem_map_size += 4096; /* Add extra headroom for map allocations */
-    st = bs->AllocatePool(EfiLoaderData, mem_map_size, (void **)&efi_mmap);
+    uint64_t map_capacity = mem_map_size + 4096;
+    st = bs->AllocatePool(EfiLoaderData, map_capacity, (void **)&efi_mmap);
     if (st != EFI_SUCCESS) {
         return st;
     }
 
     int attempts = 0;
     while (attempts++ < 5) {
+        mem_map_size = map_capacity;
         st = bs->GetMemoryMap(&mem_map_size, efi_mmap, &map_key, &desc_size, &desc_version);
         if (st != EFI_SUCCESS) {
             continue;
         }
+
+        if (desc_size < sizeof(EFI_MEMORY_DESCRIPTOR) || mem_map_size % desc_size != 0 ||
+            mem_map_size / desc_size > STRATUM_BOOT_MAX_DESCS) return EFI_LOAD_ERROR;
 
         st = bs->ExitBootServices(ImageHandle, map_key);
         if (st == EFI_SUCCESS) {
@@ -342,7 +362,7 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     uint64_t num_entries = mem_map_size / desc_size;
     uint8_t *cur = (uint8_t *)efi_mmap;
 
-    for (uint64_t i = 0; i < num_entries && out_count < MAX_MEM_DESCS; i++) {
+    for (uint64_t i = 0; i < num_entries; i++) {
         EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR *)cur;
         boot_mem_desc_t *out = &boot_mem_descs[out_count];
 
@@ -386,6 +406,8 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
      * place handoff_phys into RDI, STRATUM_BOOT_MAGIC into RSI, and jump to entry_addr.
      */
     __asm__ volatile(
+        "cli\n\t"
+        "cld\n\t"
         "movq %0, %%cr3\n\t"
         "movq %1, %%rsp\n\t"
         "movq %2, %%rdi\n\t"

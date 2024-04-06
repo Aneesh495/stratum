@@ -133,6 +133,8 @@ int32_t process_fork(syscall_regs_t *regs) {
         return -STRATUM_ENOMEM;
     }
 
+    memcpy(child->regions, parent->regions, sizeof(child->regions));
+
     /* Duplicate file descriptors */
     fd_table_copy(&child->fds, &parent->fds);
 

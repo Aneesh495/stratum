@@ -13,6 +13,10 @@
 
 #define STRATUM_BOOT_MAGIC   0x5354524154554D31ULL /* "STRATUM1" */
 #define STRATUM_BOOT_VERSION 1
+#define STRATUM_BOOT_MAX_DESCS 512
+#define STRATUM_BOOT_PHYS_LIMIT (1ULL << 32)
+#define STRATUM_KERNEL_BASE 0xFFFFFFFF80000000ULL
+#define STRATUM_KERNEL_WINDOW (64ULL * 1024 * 1024)
 
 /* Memory region types passed by the bootloader */
 #define BOOT_MEM_USABLE        1  /* Free conventional RAM for PMM */

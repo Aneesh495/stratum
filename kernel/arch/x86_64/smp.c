@@ -10,6 +10,7 @@
 #include <kernel/syscall.h>
 #include <kernel/string.h>
 #include <kernel/x86_64.h>
+#include <shared/errno.h>
 
 extern const uint8_t g_trampoline_binary[];
 extern const uint64_t g_trampoline_binary_len;
@@ -17,6 +18,8 @@ extern const uint64_t g_trampoline_binary_len;
 cpu_t g_cpus[SMP_MAX_CPUS];
 volatile uint32_t g_smp_online_cpus = 0;
 static spinlock_t g_smp_boot_lock = SPINLOCK_INIT;
+static spinlock_t shootdown_lock = SPINLOCK_INIT;
+static bool shootdown_failed;
 
 cpu_t *smp_get_current_cpu(void) {
     uint64_t gs = rdmsr(MSR_GS_BASE);
@@ -31,19 +34,19 @@ uint32_t smp_get_cpu_id(void) {
 }
 
 uint32_t smp_get_online_cpus(void) {
-    return g_smp_online_cpus;
+    return __atomic_load_n(&g_smp_online_cpus, __ATOMIC_ACQUIRE);
 }
 
 static void smp_handle_tlb_shootdown(interrupt_frame_t *frame) {
     (void)frame;
     cpu_t *me = smp_get_current_cpu();
-    uint64_t va = me->tlb_shootdown_addr;
+    uint64_t va = __atomic_load_n(&me->tlb_shootdown_addr, __ATOMIC_ACQUIRE);
     if (va == 0) {
         write_cr3(read_cr3());
     } else {
         invlpg(va);
     }
-    me->tlb_shootdown_ack = 1;
+    __atomic_store_n(&me->tlb_shootdown_ack, 1, __ATOMIC_RELEASE);
 }
 
 static void smp_handle_halt(interrupt_frame_t *frame) {
@@ -77,37 +80,44 @@ void smp_halt_all(void) {
     smp_broadcast_ipi(VEC_IPI_HALT, false);
 }
 
-void smp_tlb_shootdown(uint64_t vaddr) {
-    /* Always invalidate local TLB */
-    if (vaddr == 0) {
-        write_cr3(read_cr3());
-    } else {
-        invlpg(vaddr);
+int smp_tlb_shootdown(uint64_t vaddr) {
+    uint64_t flags = local_irq_save();
+    if (!spin_trylock(&shootdown_lock)) {
+        local_irq_restore(flags);
+        return -STRATUM_EBUSY;
     }
-
-    if (g_smp_online_cpus <= 1) {
-        return;
+    int result = 0;
+    if (shootdown_failed) {
+        result = -STRATUM_EIO;
+        goto out;
     }
+    if (vaddr) invlpg(vaddr);
+    else write_cr3(read_cr3());
 
-    /* Broadcast shootdown request to online APs */
-    for (uint32_t i = 0; i < g_acpi_info.cpu_count; i++) {
-        if (g_cpus[i].is_online && !g_cpus[i].is_bsp) {
-            g_cpus[i].tlb_shootdown_addr = vaddr;
-            g_cpus[i].tlb_shootdown_ack = 0;
-        }
+    uint32_t current = smp_get_cpu_id();
+    uint32_t online = smp_get_online_cpus();
+    for (uint32_t cpu = 0; cpu < online; cpu++) {
+        if (cpu == current) continue;
+        __atomic_store_n(&g_cpus[cpu].tlb_shootdown_ack, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_cpus[cpu].tlb_shootdown_addr, vaddr, __ATOMIC_RELEASE);
+        smp_send_ipi(g_cpus[cpu].lapic_id, VEC_IPI_TLB);
     }
-
-    smp_broadcast_ipi(VEC_IPI_TLB, false);
-
-    /* Await acknowledgments */
-    for (uint32_t i = 0; i < g_acpi_info.cpu_count; i++) {
-        if (g_cpus[i].is_online && !g_cpus[i].is_bsp) {
-            uint32_t spins = 100000;
-            while (g_cpus[i].tlb_shootdown_ack == 0 && spins--) {
-                cpu_pause();
+    for (uint32_t cpu = 0; cpu < online; cpu++) {
+        if (cpu == current) continue;
+        unsigned spins = 1000000;
+        while (!__atomic_load_n(&g_cpus[cpu].tlb_shootdown_ack, __ATOMIC_ACQUIRE)) {
+            if (spins-- == 0) {
+                shootdown_failed = true;
+                result = -STRATUM_ETIMEDOUT;
+                goto out;
             }
+            cpu_pause();
         }
     }
+out:
+    spin_unlock(&shootdown_lock);
+    local_irq_restore(flags);
+    return result;
 }
 
 void smp_ap_entry(uint64_t cpu_id) {
@@ -161,8 +171,8 @@ void smp_init(const boot_handoff_t *handoff) {
 
     /* 1. Initialize ACPI to discover topology */
     if (acpi_init(handoff) != 0) {
+        memset(&g_acpi_info, 0, sizeof(g_acpi_info));
         kprintf("[SMP] ACPI initialization failed, running in uniprocessor mode.\n");
-        return;
     }
 
     /* 2. Initialize BSP Local APIC */
@@ -203,14 +213,17 @@ void smp_init(const boot_handoff_t *handoff) {
     kprintf("[SMP] Starting %u Application Processor(s)...\n", g_acpi_info.cpu_count - 1);
 
     /* 7. Boot each Application Processor sequentially */
-    for (uint32_t i = 1; i < g_acpi_info.cpu_count; i++) {
-        uint32_t apic_id = g_acpi_info.cpu_apic_ids[i];
-        if (!g_acpi_info.cpu_enabled[i] || apic_id == g_cpus[0].lapic_id) {
+    for (uint32_t entry = 0; entry < g_acpi_info.cpu_count; entry++) {
+        uint32_t apic_id = g_acpi_info.cpu_apic_ids[entry];
+        if (!g_acpi_info.cpu_enabled[entry] || apic_id == g_cpus[0].lapic_id) {
             continue;
         }
 
-        /* Allocate 16 KiB kernel stack for AP */
-        uint64_t stack_phys = pmm_alloc_pages(2);
+        uint32_t i = smp_get_online_cpus();
+        if (i >= SMP_MAX_CPUS) break;
+
+        /* 16 KiB idle stack and two private 8 KiB interrupt stacks. */
+        uint64_t stack_phys = pmm_alloc_pages(3);
         if (stack_phys == 0) {
             kprintf("[SMP] ERROR: Out of physical memory for CPU #%u stack!\n", i);
             break;
@@ -256,6 +269,8 @@ void smp_init(const boot_handoff_t *handoff) {
             kprintf("[SMP] CPU #%u (APIC ID %u) booted successfully.\n", i, apic_id);
         } else {
             kprintf("[SMP] WARNING: CPU #%u (APIC ID %u) startup timed out!\n", i, apic_id);
+            spin_unlock(&g_smp_boot_lock);
+            break; /* A late AP must not read another CPU's mailbox. */
         }
 
         spin_unlock(&g_smp_boot_lock);

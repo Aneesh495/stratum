@@ -1,7 +1,6 @@
 #include "elf.h"
 
-#define KERNEL_BASE 0xFFFFFFFF80000000ULL
-#define KERNEL_WINDOW (64ULL * 1024 * 1024)
+#include <shared/boot_info.h>
 #define PAGE_SIZE 4096ULL
 
 static void efi_memset(void *dest, int val, uint64_t count) {
@@ -83,8 +82,8 @@ EFI_STATUS elf_load_segments(EFI_BOOT_SERVICES *bs, EFI_FILE_PROTOCOL *file, con
         if (ph->p_type != PT_LOAD) continue;
         if (!ph->p_memsz && !ph->p_filesz) continue;
 
-        if (ph->p_vaddr < KERNEL_BASE || ph->p_vaddr >= KERNEL_BASE + KERNEL_WINDOW ||
-            ph->p_memsz > KERNEL_BASE + KERNEL_WINDOW - ph->p_vaddr ||
+        if (ph->p_vaddr < STRATUM_KERNEL_BASE || ph->p_vaddr >= STRATUM_KERNEL_BASE + STRATUM_KERNEL_WINDOW ||
+            ph->p_memsz > STRATUM_KERNEL_BASE + STRATUM_KERNEL_WINDOW - ph->p_vaddr ||
             ph->p_filesz > ph->p_memsz || ph->p_offset > file_size ||
             ph->p_filesz > file_size - ph->p_offset ||
             (ph->p_flags & (PF_W | PF_X)) == (PF_W | PF_X)) goto invalid;
@@ -103,11 +102,11 @@ EFI_STATUS elf_load_segments(EFI_BOOT_SERVICES *bs, EFI_FILE_PROTOCOL *file, con
             ehdr->e_entry - ph->p_vaddr < ph->p_filesz) entry_found = 1;
     }
 
-    if (!entry_found || min_vaddr != KERNEL_BASE) goto invalid;
+    if (!entry_found || min_vaddr != STRATUM_KERNEL_BASE) goto invalid;
     uint64_t page_count = (max_vaddr - min_vaddr + PAGE_SIZE - 1) / PAGE_SIZE;
 
-    uint64_t phys_base = 0;
-    status = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, page_count, &phys_base);
+    uint64_t phys_base = STRATUM_BOOT_PHYS_LIMIT - 1;
+    status = bs->AllocatePages(AllocateMaxAddress, EfiLoaderData, page_count, &phys_base);
     if (status != EFI_SUCCESS) {
         bs->FreePool(phdrs);
         return status;

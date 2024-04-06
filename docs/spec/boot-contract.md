@@ -79,11 +79,16 @@ typedef struct {
 } boot_handoff_t;
 ```
 
-## 5. Validation Rules
-The kernel validates the handoff structure immediately on entry before using any pointer:
-1. `magic == STRATUM_BOOT_MAGIC`
-2. `version == STRATUM_BOOT_VERSION`
-3. `header_size == sizeof(boot_handoff_t)`
-4. `mem_map_entries > 0` and `mem_map_phys != 0`
-5. No memory descriptor overlaps with kernel image or initramfs regions unless typed accordingly.
-6. If validation fails, the kernel writes an explicit diagnostic to serial port COM1 (0x3F8) and halts via `cli; hlt`.
+## 5. Validation rules
+
+The handoff, boot page tables, kernel image, stack, and descriptor array are
+allocated below 4 GiB. The loader requires a static x86-64 kernel ELF linked
+within the 64 MiB kernel load window. It rejects overlapping load segments,
+writable-executable segments, out-of-range file slices, and entry points
+outside file-backed executable code.
+
+The kernel checks the handoff magic, version, structure size, memory-map
+count and stride, physical ranges, framebuffer geometry, and command-line
+termination. It rejects usable memory descriptors that overlap one another
+or the handoff, kernel image, initramfs, or descriptor array. A rejected
+handoff produces a serial diagnostic and halts.

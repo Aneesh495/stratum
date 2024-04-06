@@ -87,6 +87,26 @@ static inline int64_t syscall5(uint64_t nr, uint64_t a1, uint64_t a2, uint64_t a
     return ret;
 }
 
+/* Anonymous mappings return an address or a negative Stratum errno. */
+static inline int64_t mmap_anonymous(size_t length, unsigned protection) {
+    int64_t result;
+    register uint64_t r10 __asm__("r10") = MAP_PRIVATE | MAP_ANONYMOUS;
+    register uint64_t r8 __asm__("r8") = (uint64_t)-1;
+    register uint64_t r9 __asm__("r9") = 0;
+    __asm__ volatile("syscall" : "=a"(result)
+        : "a"(SYS_mmap), "D"(0), "S"(length), "d"(protection), "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory");
+    return result;
+}
+
+static inline int munmap(void *addr, size_t length) {
+    return (int)syscall2(SYS_munmap, (uint64_t)addr, length);
+}
+
+static inline int mprotect(void *addr, size_t length, unsigned protection) {
+    return (int)syscall3(SYS_mprotect, (uint64_t)addr, length, protection);
+}
+
 void exit(int status) __attribute__((noreturn));
 
 /* File System API */

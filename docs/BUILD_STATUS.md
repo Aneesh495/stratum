@@ -5,7 +5,7 @@ The current verification baseline covers the normal QEMU image and an opt-in dia
 | Gate | Exercised in regression | Still required |
 | --- | --- | --- |
 | A01 | Nine QEMU profiles, 17 malformed EFI images, and a shell with no data disk | Repeated boots, per-CPU workload probes, debugger evidence, and the remaining malformed loader and handoff cases |
-| A02 | 2 million host model operations, guest allocator and page mappings, and fork/COW checks | Declared guest fault counts and cross-CPU mapping replacement |
+| A02 | 2 million host model operations, concurrent guest allocator checks, 128 demand-zero pages per diagnostic profile, and fork/COW protection | Remaining declared guest fault counts and cross-CPU mapping replacement |
 | A03 | Preemption and workers on the SMP diagnostic path | User-thread API, live population and race campaigns |
 | A04 | Ring 3 entry, 64 fork/reap cycles per diagnostic profile, invalid status pointer, and a faulting child | Exec, native threads, TLS, and the full boundary corpus |
 | A05 | Pipe transfer, readiness, EOF, and descriptor duplication | Message channels and full partial-I/O and readiness-race workloads |
@@ -15,7 +15,7 @@ The current verification baseline covers the normal QEMU image and an opt-in dia
 | A09 | Native TCP service, durable acknowledgment, duplicate/conflict handling, and a record transferred to a second guest and read after reboot | Concurrent clients, automatic replication, workload counts, and repeated interruption |
 | A10 | Five bounded guest stress cycles, including 8 vCPUs and 1 GiB | 60 minutes of mixed active workloads and full resource reconciliation |
 | A11 | 2.1 million standalone parser-model mutations under sanitizers | Production-target fuzzing duration and independent wait/TLB exploration |
-| A12 | Source-bound regression bundle and two isolated artifact builds | Complete fixed-gate evidence, full verifier corpus, and release publication |
+| A12 | Source-bound regression bundle, 14 verifier mutation controls, and two isolated artifact builds | Complete fixed-gate evidence, full verifier corpus, and release publication |
 
 The original smoke reports and synthetic benchmark table were removed from the current tree. Git history preserves them. The [host benchmark harness](../bench/results.md) records raw host measurements separately from guest results.
 

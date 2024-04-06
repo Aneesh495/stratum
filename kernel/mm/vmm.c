@@ -241,6 +241,9 @@ void vmm_page_fault_handler(interrupt_frame_t *frame) {
     bool is_present = (error_code & 1) != 0;
     bool is_write   = (error_code & 2) != 0;
     bool is_user    = (error_code & 4) != 0;
+    bool is_execute = (error_code & 16) != 0;
+    extern uint8_t __usercopy_start[], __usercopy_end[], __usercopy_fault[];
+    bool is_usercopy = frame->rip >= (uint64_t)__usercopy_start && frame->rip < (uint64_t)__usercopy_end;
 
     /* Check for kernel upper-half PML4 synchronization */
     if (fault_addr >= 0xFFFF800000000000ULL) {
@@ -289,14 +292,11 @@ void vmm_page_fault_handler(interrupt_frame_t *frame) {
         }
     }
 
-    /* No user mapping exists without an explicit region or an ELF segment. */
+    if (!is_present && (is_user || is_usercopy) &&
+        user_demand_page(process_get_current(), fault_addr, is_write, is_execute)) return;
+
 usercopy_fixup:
-    ;
-    /* Check for safe usercopy fault (EFAULT recovery) */
-    extern uint8_t __usercopy_start[];
-    extern uint8_t __usercopy_end[];
-    extern uint8_t __usercopy_fault[];
-    if (frame->rip >= (uint64_t)__usercopy_start && frame->rip < (uint64_t)__usercopy_end) {
+    if (is_usercopy) {
         frame->rip = (uint64_t)__usercopy_fault;
         return;
     }

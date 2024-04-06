@@ -51,7 +51,7 @@ uint32_t smp_get_online_cpus(void);
 
 void     smp_send_ipi(uint32_t dest_apic_id, uint8_t vector);
 void     smp_broadcast_ipi(uint8_t vector, bool include_self);
-void     smp_tlb_shootdown(uint64_t vaddr);
+int      smp_tlb_shootdown(uint64_t vaddr);
 void     smp_halt_all(void);
 
 void     smp_ap_entry(uint64_t cpu_id);
