@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      storage_campaign:
+        description: Run the 100-interruption StrataFS campaign
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -13,13 +18,15 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Install build and VM dependencies
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld libclang-rt-dev nasm qemu-system-x86 ovmf mtools
+          apt_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends clang lld libclang-rt-dev nasm qemu-system-x86 ovmf mtools
       - name: Check toolchain and documentation
         run: make doctor docs
       - name: Run sanitizer-enabled host tests
@@ -29,6 +36,9 @@ jobs:
           make -j2 smoke
           make -j2 test-boot
           python3 scripts/test_diagnostics.py all
+      - name: Run the extended storage campaign
+        if: github.event_name == 'workflow_dispatch' && inputs.storage_campaign
+        run: python3 scripts/test_wal_crash.py --repeats 10
       - name: Preserve guest transcripts
         if: always()
         uses: actions/upload-artifact@v4
@@ -37,4 +47,5 @@ jobs:
           path: |
             build/**/*.log
             build/replication/*.pcap
+            build/wal-crash-*/**/*.json
           if-no-files-found: ignore

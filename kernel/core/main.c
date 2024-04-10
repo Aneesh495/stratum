@@ -62,9 +62,7 @@ static _Noreturn void start_system(void) {
         kprintf("[KERNEL] Root mount failed (%d). Starting shell without storage.\n", mount_result);
     }
     net_init();
-    if (strcmp(g_boot_handoff.cmdline, "crash=wal-published\n") == 0) {
-        journal_test_crash_after_publish();
-    }
+    journal_test_configure(g_boot_handoff.cmdline);
 
     static user_program_t init;
     kassert(user_elf_load(g_user_init_binary, g_user_init_binary_len, &init) == 0);

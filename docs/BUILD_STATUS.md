@@ -11,7 +11,7 @@ The current verification baseline covers the normal QEMU image and an opt-in dia
 | A05 | Pipe transfer, readiness, EOF, and descriptor duplication | Message channels and full partial-I/O and readiness-race workloads |
 | A06 | Modern virtio-blk read/write/flush and virtio-net frames on the wire | Full device index wraps, saturation, and reset recovery |
 | A07 | Directory and indirect-block I/O, a forced stop after WAL publication, replay, and corrupt-image rejection | Full mixed workload, independent namespace traversal, and interruptions at other transaction stages |
-| A08 | Guest TCP data transfer, real ARP, exact Ethernet capture payloads, and a separate host-client path | Bulk and impaired sessions, malformed traffic campaign, and UDP interoperability |
+| A08 | Guest TCP data transfer, real ARP, exact Ethernet capture payloads including a retransmitted reply, and a separate host-client path | Bulk and broader impairment sessions, malformed traffic campaign, and UDP interoperability |
 | A09 | Native TCP service, durable acknowledgment, duplicate/conflict handling, and a record transferred to a second guest and read after reboot | Concurrent clients, automatic replication, workload counts, and repeated interruption |
 | A10 | Five bounded guest stress cycles, including 8 vCPUs and 1 GiB | 60 minutes of mixed active workloads and full resource reconciliation |
 | A11 | 2.1 million standalone parser-model mutations under sanitizers | Production-target fuzzing duration and independent wait/TLB exploration |

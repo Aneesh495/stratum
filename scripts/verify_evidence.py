@@ -77,7 +77,7 @@ def verify(root):
               "Guest stress smoke completed" in log,
               f"{cpus} CPUs: missing ABI or stress observation")
     check("Invalid Opcode (#UD)" in read("transcripts/diagnostics/faults-2.log"), "missing kernel fault diagnostic")
-    check("WAL published before home writes." in read("transcripts/recovery/interrupted.log") and
+    check("WAL crash stage published." in read("transcripts/recovery/interrupted.log") and
           "Replayed committed transaction" in read("transcripts/recovery/replayed.log") and
           "Journal initialization failed: -5" in read("transcripts/recovery/rejected.log"), "WAL recovery evidence mismatch")
     check("duplicate/conflict handling" in read("logs/ledger.log"), "missing TCP ledger assertion results")

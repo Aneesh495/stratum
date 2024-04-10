@@ -52,7 +52,7 @@ def main():
         with running(command(fault_image, disk, cpus=2), log / "interrupted.log") as guest:
             guest.expect(PROMPT)
             guest.send(b"write /wal-token recovered\r")
-            guest.expect("[TEST] WAL published before home writes.")
+            guest.expect("[TEST] WAL crash stage published.")
             guest.interrupt()
 
         corrupt = directory / "corrupt.img"

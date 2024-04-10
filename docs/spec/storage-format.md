@@ -19,3 +19,5 @@ The journal publishes one pending transaction at a time. Commit writes a checksu
 Recovery validates the published descriptor, sequence, targets, commit record, and payload checksum before changing home blocks. A corrupt published transaction rejects the mount. Format-on-mount requires an all-zero volume. A legacy journal with matching head and tail can be upgraded. Invalid legacy filesystem inodes require offline inspection.
 
 `scripts/test_recovery.py` tests a VM interruption after the published range is durable and before home writes. This is a QEMU process-interruption test. The storage device's flush behavior defines the durability boundary.
+`make test-storage-crash` repeats ten interruption points ten times each and
+records the expected old or new record, replay result, and disk hashes.

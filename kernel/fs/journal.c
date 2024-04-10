@@ -11,10 +11,53 @@ _Static_assert(sizeof(journal_sb_t) == JOURNAL_BLOCK_SIZE, "journal superblock l
 _Static_assert(sizeof(journal_desc_block_t) == JOURNAL_BLOCK_SIZE, "journal descriptor layout");
 _Static_assert(sizeof(journal_commit_block_t) == JOURNAL_BLOCK_SIZE, "journal commit layout");
 
-static bool crash_after_publish;
+typedef enum {
+    CRASH_DISABLED,
+    CRASH_BEFORE_DESCRIPTOR,
+    CRASH_AFTER_DESCRIPTOR,
+    CRASH_FIRST_PAYLOAD,
+    CRASH_PAYLOAD_FLUSHED,
+    CRASH_COMMIT_WRITTEN,
+    CRASH_COMMIT_FLUSHED,
+    CRASH_PUBLISHED,
+    CRASH_FIRST_HOME,
+    CRASH_HOME_FLUSHED,
+    CRASH_CHECKPOINTED,
+} crash_stage_t;
 
-void journal_test_crash_after_publish(void) {
-    crash_after_publish = true;
+static crash_stage_t crash_stage;
+static const char *const crash_labels[] = {
+    [CRASH_BEFORE_DESCRIPTOR] = "before-descriptor",
+    [CRASH_AFTER_DESCRIPTOR] = "after-descriptor",
+    [CRASH_FIRST_PAYLOAD] = "first-payload",
+    [CRASH_PAYLOAD_FLUSHED] = "payload-flushed",
+    [CRASH_COMMIT_WRITTEN] = "commit-written",
+    [CRASH_COMMIT_FLUSHED] = "commit-flushed",
+    [CRASH_PUBLISHED] = "published",
+    [CRASH_FIRST_HOME] = "first-home",
+    [CRASH_HOME_FLUSHED] = "home-flushed",
+    [CRASH_CHECKPOINTED] = "checkpointed",
+};
+
+void journal_test_configure(const char *cmdline) {
+    static const char prefix[] = "crash=wal-";
+    if (strncmp(cmdline, prefix, sizeof(prefix) - 1) != 0) return;
+    const char *stage = cmdline + sizeof(prefix) - 1;
+    for (unsigned i = 1; i < sizeof(crash_labels) / sizeof(crash_labels[0]); i++) {
+        size_t length = strlen(crash_labels[i]);
+        if (strncmp(stage, crash_labels[i], length) == 0 &&
+            (stage[length] == 0 || stage[length] == '\n')) {
+            crash_stage = (crash_stage_t)i;
+            return;
+        }
+    }
+}
+
+static void crash_probe(crash_stage_t stage) {
+    if (crash_stage != stage) return;
+    kprintf("[TEST] WAL crash stage %s.\n", crash_labels[stage]);
+    cli();
+    for (;;) hlt();
 }
 
 uint32_t journal_crc32(const void *data, size_t length) {
@@ -78,8 +121,11 @@ static int apply(journal_t *j, const journal_tx_t *tx) {
     for (uint32_t i = 0; i < tx->num_blocks; i++) {
         int res = write_block(j->dev, tx->blocks[i].target_block, tx->blocks[i].data);
         if (res != 0) return res;
+        if (i == 0) crash_probe(CRASH_FIRST_HOME);
     }
-    return virtio_blk_flush(j->dev);
+    int res = virtio_blk_flush(j->dev);
+    if (res == 0) crash_probe(CRASH_HOME_FLUSHED);
+    return res;
 }
 
 static int recover(journal_t *j) {
@@ -170,6 +216,7 @@ int journal_init(virtio_blk_dev_t *dev, uint64_t start_block, uint32_t block_cou
 
 int journal_begin(journal_t *j, journal_tx_t **out_tx) {
     if (!j->active) return -STRATUM_EIO;
+    if (j->dev->read_only) return -STRATUM_EROFS;
     journal_tx_t *tx = kmalloc(sizeof(*tx));
     if (!tx) return -STRATUM_ENOMEM;
     tx->sequence_num = j->sb.sequence_num;
@@ -227,14 +274,18 @@ int journal_commit(journal_t *j, journal_tx_t *tx) {
     desc->checksum = journal_crc32(desc, sizeof(*desc));
 
     uint32_t slot = j->sb.tail_block;
+    crash_probe(CRASH_BEFORE_DESCRIPTOR);
     if (write_block(j->dev, j->start_block + slot, desc) != 0) goto out;
+    crash_probe(CRASH_AFTER_DESCRIPTOR);
     uint32_t crc = 0;
     for (uint32_t i = 0; i < tx->num_blocks; i++) {
         slot = next_slot(j, slot);
         if (write_block(j->dev, j->start_block + slot, tx->blocks[i].data) != 0) goto out;
         crc = payload_crc(crc, tx->blocks[i].data);
+        if (i == 0) crash_probe(CRASH_FIRST_PAYLOAD);
     }
     if (virtio_blk_flush(j->dev) != 0) goto out;
+    crash_probe(CRASH_PAYLOAD_FLUSHED);
 
     journal_commit_block_t *commit = block;
     memset(commit, 0, sizeof(*commit));
@@ -243,22 +294,21 @@ int journal_commit(journal_t *j, journal_tx_t *tx) {
     commit->data_crc32 = crc;
     commit->checksum = journal_crc32(commit, offsetof(journal_commit_block_t, checksum));
     slot = next_slot(j, slot);
-    if (write_block(j->dev, j->start_block + slot, commit) != 0 ||
-        virtio_blk_flush(j->dev) != 0) goto out;
+    if (write_block(j->dev, j->start_block + slot, commit) != 0) goto out;
+    crash_probe(CRASH_COMMIT_WRITTEN);
+    if (virtio_blk_flush(j->dev) != 0) goto out;
+    crash_probe(CRASH_COMMIT_FLUSHED);
 
     /* Publish the replay range before making any changes to home blocks. */
     j->sb.tail_block = next_slot(j, slot);
     j->sb.sequence_num++;
     if (persist_superblock(j->dev, j->start_block, &j->sb) != 0) goto out;
-    if (crash_after_publish) {
-        kprintf("[TEST] WAL published before home writes.\n");
-        cli();
-        for (;;) hlt();
-    }
+    crash_probe(CRASH_PUBLISHED);
     if (apply(j, tx) != 0) goto out;
 
     j->sb.head_block = j->sb.tail_block;
     res = persist_superblock(j->dev, j->start_block, &j->sb);
+    if (res == 0) crash_probe(CRASH_CHECKPOINTED);
 out:
     /* An uncertain commit must remain available for replay on next mount. */
     if (res != 0) j->active = false;

@@ -162,7 +162,7 @@ static void fmt_number(char **buf, size_t *rem, uint64_t n, int base, bool sign,
 
     if (sign && (int64_t)n < 0) {
         negative = true;
-        n = (uint64_t)(-(int64_t)n);
+        n = 0 - n;
     }
 
     if (n == 0) {
@@ -181,14 +181,14 @@ static void fmt_number(char **buf, size_t *rem, uint64_t n, int base, bool sign,
                 (*rem)--;
             }
             width--;
-            negative = false;
         } else {
             tmp[idx++] = '-';
         }
     }
 
-    while (idx < width) {
-        tmp[idx++] = pad;
+    while (width-- > idx && *rem > 1) {
+        *(*buf)++ = pad;
+        (*rem)--;
     }
 
     while (idx > 0) {
@@ -240,7 +240,7 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
 
         int width = 0;
         while (*format >= '0' && *format <= '9') {
-            width = width * 10 + (*format - '0');
+            if (width < 1024) width = width * 10 + (*format - '0');
             format++;
         }
 

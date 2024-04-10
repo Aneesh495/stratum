@@ -851,7 +851,7 @@ static int64_t stratafs_vfs_write(vfs_node_t *node, uint64_t offset, const void 
     int64_t written = res ? res : stratafs_write_file(fs, tx, (uint32_t)node->inode_num, &inode,
                                                       offset, buf, count);
     res = finish_tx(fs, tx, written < 0 ? (int)written : 0);
-    if (res == 0) node->size = inode.size;
+    if (res == 0 && written > 0) node->size = inode.size;
     spin_unlock_irqrestore(&fs->lock, flags);
     return res ? res : written;
 }
@@ -967,6 +967,8 @@ int stratafs_mount_fs(vfs_mount_t *mnt, const char *dev_name) {
     }
 
     if (g_stratafs_active) return -STRATUM_EBUSY;
+    uint64_t blocks = blk->capacity_sectors / STRATAFS_SECTORS_PER_BLOCK;
+    if (blocks < 1024 || blocks > STRATAFS_MAX_BITMAP_BITS) return -STRATUM_ENOSPC;
     stratafs_t *fs = &g_stratafs;
     memset(fs, 0, sizeof(stratafs_t));
     fs->dev = blk;

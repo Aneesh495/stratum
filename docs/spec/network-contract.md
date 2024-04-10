@@ -36,4 +36,5 @@ and consensus remain outside this implementation.
 
 The host-client smoke test uses QEMU user networking. The two-guest test
 forwards Ethernet frames over an isolated QEMU socket link and independently
-checks the request and response bytes in a packet capture.
+checks the request and response bytes in a packet capture. The relay drops the
+first application reply, and the capture must show the retransmitted segment.

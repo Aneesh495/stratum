@@ -64,7 +64,7 @@ typedef struct journal {
 uint32_t journal_crc32(const void *data, size_t length);
 
 /* Journal calls are serialized by the filesystem. */
-void journal_test_crash_after_publish(void);
+void journal_test_configure(const char *cmdline);
 int  journal_format(virtio_blk_dev_t *dev, uint64_t start_block, uint32_t block_count);
 int  journal_init(virtio_blk_dev_t *dev, uint64_t start_block, uint32_t block_count, journal_t *j);
 int  journal_begin(journal_t *j, journal_tx_t **out_tx);

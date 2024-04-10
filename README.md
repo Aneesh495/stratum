@@ -42,9 +42,10 @@ The service acknowledges an append after the guest filesystem flushes it. Identi
 | Command | Work exercised |
 | --- | --- |
 | `make test fuzz` | Sanitizer-enabled host models and parser mutations |
-| `make smoke` | Ring 3 shell, real WAL replay and corruption rejection, TCP ledger reboot, and two-guest Ethernet transfer |
+| `make smoke` | Ring 3 shell, real WAL replay and corruption rejection, TCP ledger reboot, and two-guest Ethernet transfer with a dropped reply |
 | `make test-boot` | Nine QEMU configurations and 17 malformed loader images |
 | `make test-abi test-storage test-faults` | Guest ABI, COW, pipes, filesystem paths, and deliberate trap handling |
+| `make test-storage-crash` | 100 forced VM interruptions across ten WAL stages |
 | `make evidence` | Tests and two clean builds from the committed source |
 | `make verify` | Read-only validation of a generated regression bundle |
 
