@@ -213,6 +213,36 @@ static int64_t sys_unlink_impl(const char *u_path) {
     return vfs_unlink(kpath);
 }
 
+static int64_t sys_rename_impl(const char *old_path, const char *new_path) {
+    char old_name[VFS_MAX_PATH], new_name[VFS_MAX_PATH];
+    int res = copy_str_from_user(old_name, old_path, sizeof(old_name));
+    if (res == 0) res = copy_str_from_user(new_name, new_path, sizeof(new_name));
+    return res ? res : vfs_rename(old_name, new_name);
+}
+
+static int64_t sys_readdir_impl(int fd, strat_dirent_t *user_entry) {
+    process_t *proc = process_get_current();
+    if (!proc) return -STRATUM_ESRCH;
+    file_t *file = fd_get(&proc->fds, fd);
+    if (!file) return -STRATUM_EBADF;
+    if (file->type != FILE_TYPE_VFS || !(file->flags & O_DIRECTORY)) {
+        file_close(file);
+        return -STRATUM_ENOTDIR;
+    }
+
+    vfs_node_t *node = file->priv;
+    uint64_t flags;
+    spin_lock_irqsave(&file->lock, &flags);
+    uint64_t offset = file->offset;
+    strat_dirent_t entry = {0};
+    int res = node->ops && node->ops->readdir ? node->ops->readdir(node, &offset, &entry) : -STRATUM_ENOSYS;
+    if (res > 0 && copy_to_user(user_entry, &entry, sizeof(entry)) != 0) res = -STRATUM_EFAULT;
+    if (res >= 0) file->offset = offset;
+    spin_unlock_irqrestore(&file->lock, flags);
+    file_close(file);
+    return res;
+}
+
 static int64_t sys_fsync_impl(int fd) {
     process_t *proc = process_get_current();
     if (!proc) return -STRATUM_ESRCH;
@@ -288,10 +318,10 @@ static int64_t sys_sysinfo_impl(strat_sysinfo_t *u_info) {
     memset(&kinfo, 0, sizeof(kinfo));
     kinfo.uptime_ms = timer_get_uptime_ms();
     kinfo.online_cpus = smp_get_online_cpus();
-    kinfo.active_processes = 1;
+    kinfo.active_processes = process_active_count();
     kinfo.total_memory_bytes = pmm_get_total_pages() * PAGE_SIZE;
     kinfo.free_memory_bytes = pmm_get_free_pages() * PAGE_SIZE;
-    kinfo.total_syscalls = g_total_syscall_count;
+    kinfo.total_syscalls = __atomic_load_n(&g_total_syscall_count, __ATOMIC_RELAXED);
     if (copy_to_user(u_info, &kinfo, sizeof(kinfo)) != 0) return -STRATUM_EFAULT;
     return 0;
 }
@@ -457,6 +487,12 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
     case SYS_unlink: {
         return sys_unlink_impl((const char *)regs->rdi);
     }
+
+    case SYS_rename:
+        return sys_rename_impl((const char *)regs->rdi, (const char *)regs->rsi);
+
+    case SYS_readdir:
+        return sys_readdir_impl((int)regs->rdi, (strat_dirent_t *)regs->rsi);
 
     case SYS_fsync: {
         return sys_fsync_impl((int)regs->rdi);

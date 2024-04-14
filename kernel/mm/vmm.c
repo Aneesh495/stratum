@@ -20,6 +20,7 @@ extern char _kernel_end[];
 
 static page_table_t *get_or_create_table(uint64_t *entry, uint64_t flags) {
     if (*entry & PTE_PRESENT) {
+        if (*entry & PTE_HUGE) return NULL;
         if (flags & PTE_USER) {
             *entry |= PTE_USER;
         }
@@ -75,9 +76,11 @@ int vmm_unmap_page(pml4_t *pml4, uint64_t vaddr) {
     page_table_t *pdpt = (page_table_t *)phys_to_virt(pml4->entries[pml4_idx] & PTE_ADDR_MASK);
 
     if (!(pdpt->entries[pdpt_idx] & PTE_PRESENT)) return 0;
+    if (pdpt->entries[pdpt_idx] & PTE_HUGE) return -1;
     page_table_t *pd = (page_table_t *)phys_to_virt(pdpt->entries[pdpt_idx] & PTE_ADDR_MASK);
 
     if (!(pd->entries[pd_idx] & PTE_PRESENT)) return 0;
+    if (pd->entries[pd_idx] & PTE_HUGE) return -1;
     page_table_t *pt = (page_table_t *)phys_to_virt(pd->entries[pd_idx] & PTE_ADDR_MASK);
 
     pt->entries[pt_idx] = 0;
@@ -97,10 +100,10 @@ int vmm_get_mapping(pml4_t *pml4, uint64_t vaddr, uint64_t *out_paddr, uint64_t 
     if (!(pml4->entries[pml4_idx] & PTE_PRESENT)) return -2;
     page_table_t *pdpt = (page_table_t *)phys_to_virt(pml4->entries[pml4_idx] & PTE_ADDR_MASK);
 
-    if (!(pdpt->entries[pdpt_idx] & PTE_PRESENT)) return -3;
+    if (!(pdpt->entries[pdpt_idx] & PTE_PRESENT) || (pdpt->entries[pdpt_idx] & PTE_HUGE)) return -3;
     page_table_t *pd = (page_table_t *)phys_to_virt(pdpt->entries[pdpt_idx] & PTE_ADDR_MASK);
 
-    if (!(pd->entries[pd_idx] & PTE_PRESENT)) return -4;
+    if (!(pd->entries[pd_idx] & PTE_PRESENT) || (pd->entries[pd_idx] & PTE_HUGE)) return -4;
     page_table_t *pt = (page_table_t *)phys_to_virt(pd->entries[pd_idx] & PTE_ADDR_MASK);
 
     if (!(pt->entries[pt_idx] & PTE_PRESENT)) return -5;
@@ -316,29 +319,39 @@ usercopy_fixup:
 void vmm_init(const boot_handoff_t *handoff) {
     /* 1. Allocate permanent kernel PML4 */
     uint64_t pml4_phys = pmm_alloc_page();
+    kassert(pml4_phys != 0);
     g_kernel_pml4 = (pml4_t *)phys_to_virt(pml4_phys);
     memset(g_kernel_pml4, 0, PAGE_SIZE);
 
     /* 2. Map Direct Physical Map (HHDM: 0xFFFF800000000000 to first 4 GiB) */
     /* Map 4 GiB using 2 MiB large pages for maximum TLB performance */
     uint64_t hhdm_pdpt_phys = pmm_alloc_page();
+    kassert(hhdm_pdpt_phys != 0);
     page_table_t *hhdm_pdpt = (page_table_t *)phys_to_virt(hhdm_pdpt_phys);
     memset(hhdm_pdpt, 0, PAGE_SIZE);
 
-    g_kernel_pml4->entries[PML4_INDEX(HHDM_BASE)] = hhdm_pdpt_phys | PTE_PRESENT | PTE_WRITABLE;
+    g_kernel_pml4->entries[PML4_INDEX(HHDM_BASE)] = hhdm_pdpt_phys | PTE_PRESENT | PTE_WRITABLE | PTE_NX;
     /* Identity map low memory using the same PDPT so AP bootstrap trampoline can enable paging */
     g_kernel_pml4->entries[0] = hhdm_pdpt_phys | PTE_PRESENT | PTE_WRITABLE;
 
+    uint64_t fb_start = handoff->fb_base_phys;
+    uint64_t fb_end = fb_start + (uint64_t)handoff->fb_height * handoff->fb_stride * 4;
+    const uint64_t huge_size = 0x200000ULL;
     for (uint64_t g = 0; g < 4; g++) {
         uint64_t pd_phys = pmm_alloc_page();
+        kassert(pd_phys != 0);
         page_table_t *pd = (page_table_t *)phys_to_virt(pd_phys);
         memset(pd, 0, PAGE_SIZE);
 
         hhdm_pdpt->entries[g] = pd_phys | PTE_PRESENT | PTE_WRITABLE;
 
         for (uint64_t m = 0; m < 512; m++) {
-            uint64_t paddr = (g * 512 + m) * 0x200000ULL;
-            pd->entries[m] = paddr | PTE_PRESENT | PTE_WRITABLE | PTE_HUGE;
+            uint64_t paddr = (g * 512 + m) * huge_size;
+            uint64_t flags = PTE_PRESENT | PTE_WRITABLE | PTE_HUGE;
+            /* Only the low identity mapping contains executable AP startup code. */
+            if (paddr != 0) flags |= PTE_NX;
+            if (fb_start && paddr < fb_end && fb_start < paddr + huge_size) flags |= PTE_PCD | PTE_PWT;
+            pd->entries[m] = paddr | flags;
         }
     }
 
@@ -351,7 +364,7 @@ void vmm_init(const boot_handoff_t *handoff) {
     uint64_t text_end_va = (uint64_t)_text_end;
     for (uint64_t va = text_start_va; va < text_end_va; va += PAGE_SIZE) {
         uint64_t pa = kphys + (va - kvirt_base);
-        vmm_map_page(g_kernel_pml4, va, pa, PTE_PRESENT);
+        kassert(vmm_map_page(g_kernel_pml4, va, pa, PTE_PRESENT) == 0);
     }
 
     /* Map rodata: R, NX */
@@ -359,7 +372,7 @@ void vmm_init(const boot_handoff_t *handoff) {
     uint64_t rodata_end_va = (uint64_t)_rodata_end;
     for (uint64_t va = rodata_start_va; va < rodata_end_va; va += PAGE_SIZE) {
         uint64_t pa = kphys + (va - kvirt_base);
-        vmm_map_page(g_kernel_pml4, va, pa, PTE_PRESENT | PTE_NX);
+        kassert(vmm_map_page(g_kernel_pml4, va, pa, PTE_PRESENT | PTE_NX) == 0);
     }
 
     /* Map data & bss: RW, NX */
@@ -367,19 +380,10 @@ void vmm_init(const boot_handoff_t *handoff) {
     uint64_t bss_end_va = (uint64_t)_bss_end;
     for (uint64_t va = data_start_va; va < bss_end_va; va += PAGE_SIZE) {
         uint64_t pa = kphys + (va - kvirt_base);
-        vmm_map_page(g_kernel_pml4, va, pa, PTE_PRESENT | PTE_WRITABLE | PTE_NX);
+        kassert(vmm_map_page(g_kernel_pml4, va, pa, PTE_PRESENT | PTE_WRITABLE | PTE_NX) == 0);
     }
 
-    /* 4. Map Device MMIO / Framebuffer if available */
-    if (handoff->fb_base_phys != 0) {
-        uint64_t fb_pages = (handoff->fb_height * handoff->fb_stride * 4 + PAGE_SIZE - 1) / PAGE_SIZE;
-        for (uint64_t i = 0; i < fb_pages; i++) {
-            uint64_t pa = handoff->fb_base_phys + i * PAGE_SIZE;
-            vmm_map_page(g_kernel_pml4, pa, pa, PTE_PRESENT | PTE_WRITABLE | PTE_PCD);
-        }
-    }
-
-    /* 5. Switch CR3 to the permanent kernel PML4 */
+    /* Switch to the permanent kernel page tables. */
     write_cr3(pml4_phys);
     write_cr0(read_cr0() | CR0_WP);
 

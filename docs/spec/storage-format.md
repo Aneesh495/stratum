@@ -13,6 +13,8 @@ The format uses little-endian fields and 4,096-byte blocks. The active layouts a
 | 580 onward | Directory, file, and indirect blocks |
 
 Inode zero is reserved and inode one is the root. Inodes have 12 direct pointers and one 1,024-entry indirect block. Zero block pointers in regular files read as holes. Each directory block contains sixteen fixed 256-byte entries. A zero inode field marks a free slot. An inode generation protects stale in-memory references after reuse.
+Regular files can be renamed across directories on the same volume. Replacement of
+a closed regular file commits in the same transaction as the move.
 
 The journal publishes one pending transaction at a time. Commit writes a checksummed descriptor and block images, flushes, writes a commit record, and flushes again. It then persists the pending journal range before touching the home blocks. After checkpointing and flushing the home blocks, it clears the pending range and flushes the journal header. The filesystem serializes this sequence with its inode and bitmap updates.
 

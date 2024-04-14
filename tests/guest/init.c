@@ -207,6 +207,21 @@ int main(int argc, char **argv) {
     }
     if (waitpid(writer, &status, 0) != writer || status != 142) return 21;
     if (munmap((void *)pages, length) != 0 || munmap((void *)pages, length) != -STRATUM_EINVAL) return 22;
+    strat_sysinfo_t before = {0}, after = {0};
+    if (sysinfo(&before) != 0 || before.active_processes != 1) return 23;
+    for (unsigned i = 0; i < 100; i++) {
+        int64_t address = mmap_anonymous(length, PROT_READ | PROT_WRITE);
+        if (address < 0) return 24;
+        volatile uint8_t *allocation = (volatile uint8_t *)address;
+        for (size_t offset = 0; offset < length; offset += 4096) {
+            if (allocation[offset] != 0) return 25;
+            allocation[offset] = (uint8_t)(i + 1);
+            if (allocation[offset] != i + 1) return 26;
+        }
+        if (munmap((void *)allocation, length) != 0) return 27;
+    }
+    if (sysinfo(&after) != 0 || after.free_memory_bytes != before.free_memory_bytes) return 28;
+    print("[USER] 12800 demand-zero allocations reconciled.\n");
     print("[USER] 128 demand-zero pages, mapping protections, and anonymous COW verified.\n");
     print("[USER] ABI and IPC smoke checks complete.\n");
     return 42;

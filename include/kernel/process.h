@@ -51,6 +51,7 @@ typedef struct process {
 
 void       process_init(void);
 process_t *process_get_current(void);
+uint32_t   process_active_count(void);
 process_t *process_find(uint32_t pid);
 process_t *process_create_init(user_program_t *prog);
 int32_t    process_fork(syscall_regs_t *regs);

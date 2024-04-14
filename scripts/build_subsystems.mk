@@ -56,6 +56,7 @@ KERNEL_CSRCS := kernel/core/string.c \
                 kernel/ledger/ledger.c \
                 kernel/debug/trace.c \
                 kernel/debug/panic.c \
+                tests/guest/block_wrap.c \
                 tests/guest/stress.c
 
 KERNEL_ASMSRCS := kernel/arch/x86_64/entry.S \

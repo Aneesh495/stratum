@@ -59,8 +59,11 @@ test-boot: image
 	@$(PYTHON) scripts/test_boot.py
 	@$(PYTHON) scripts/test_smoke.py --matrix
 
-test-mm test-smp test-sched test-abi test-drivers test-faults: image
+test-mm test-smp test-sched test-abi test-faults: image
 	@$(PYTHON) scripts/test_diagnostics.py $(patsubst test-%,%,$@)
+
+test-drivers: image
+	@$(PYTHON) scripts/test_block_wrap.py
 
 test-storage: image
 	@$(PYTHON) scripts/test_diagnostics.py storage

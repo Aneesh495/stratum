@@ -14,6 +14,8 @@ static void cmd_help(void) {
     u_printf("  help                Display available shell commands\n");
     u_printf("  echo [args...]      Display text arguments to stdout\n");
     u_printf("  cat <path>          Print contents of a file\n");
+    u_printf("  ls [path]           List directory entries\n");
+    u_printf("  mv <from> <to>      Rename or replace a regular file\n");
     u_printf("  mkdir <path>        Create a directory in the filesystem\n");
     u_printf("  rm <path>           Unlink / delete a file\n");
     u_printf("  write <path> <text> Append text and sync it to disk\n");
@@ -48,6 +50,22 @@ static void cmd_cat(const char *path) {
     }
     if (r < 0) u_printf("cat: read failed (err=%d)\n", (int)r);
     close(fd);
+}
+
+static int cmd_ls(const char *path) {
+    int fd = open(path, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0) {
+        u_printf("ls: cannot open '%s' (err=%d)\n", path, fd);
+        return fd;
+    }
+    strat_dirent_t entry;
+    int res;
+    while ((res = readdir(fd, &entry)) > 0) {
+        u_printf("%s%s\n", entry.d_name, entry.d_type == 2 ? "/" : "");
+    }
+    close(fd);
+    if (res < 0) u_printf("ls: cannot read '%s' (err=%d)\n", path, res);
+    return res;
 }
 
 static void cmd_stat(const char *path) {
@@ -166,6 +184,16 @@ int sh_execute_cmd(const char *cmd_line) {
         cmd_echo(argc, argv);
     } else if (strcmp(argv[0], "cat") == 0) {
         cmd_cat(argc > 1 ? argv[1] : NULL);
+    } else if (strcmp(argv[0], "ls") == 0) {
+        return cmd_ls(argc > 1 ? argv[1] : "/");
+    } else if (strcmp(argv[0], "mv") == 0) {
+        if (argc != 3) {
+            u_printf("Usage: mv <from> <to>\n");
+            return -1;
+        }
+        int res = rename(argv[1], argv[2]);
+        if (res != 0) u_printf("mv: failed (err=%d)\n", res);
+        return res;
     } else if (strcmp(argv[0], "stat") == 0) {
         cmd_stat(argc > 1 ? argv[1] : NULL);
     } else if (strcmp(argv[0], "mkdir") == 0) {

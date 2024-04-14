@@ -70,12 +70,17 @@ def verify(root):
         boot = read(f"transcripts/smoke/{name}-boot.log")
         reboot = read(f"transcripts/smoke/{name}-reboot.log")
         check(f"Online CPUs:  {cpus}\n" in boot and "durable-alpha\ndurable-beta\n" in boot and
-              "durable-alpha\ndurable-beta\n" in reboot and "err=-2" in reboot, f"{name}: shell or recovery mismatch")
+              "durable-alpha\ndurable-beta\n" in reboot and "err=-2" in reboot and
+              "mv /proof/token /proof/other" in boot and "File '/moved' unlinked." in reboot,
+              f"{name}: shell or recovery mismatch")
     for cpus in (1, 2, 4, 8):
         log = read(f"transcripts/diagnostics/stress-{cpus}.log")
         check("64 fork/reap cycles" in log and "128 demand-zero pages" in log and
+              "12800 demand-zero allocations reconciled" in log and
               "Guest stress smoke completed" in log,
               f"{cpus} CPUs: missing ABI or stress observation")
+    check("150000 reads, 2 available wraps, 2 used wraps." in read("transcripts/drivers/blk-wrap.log"),
+          "virtio-blk request or wrap count mismatch")
     check("Invalid Opcode (#UD)" in read("transcripts/diagnostics/faults-2.log"), "missing kernel fault diagnostic")
     check("WAL crash stage published." in read("transcripts/recovery/interrupted.log") and
           "Replayed committed transaction" in read("transcripts/recovery/replayed.log") and

@@ -4,6 +4,7 @@
 #include <kernel/types.h>
 #include <kernel/file.h>
 #include <kernel/spinlock.h>
+#include <shared/syscall_nums.h>
 
 #define VFS_APPEND_OFFSET ((uint64_t)-1)
 #define VFS_MAX_PATH        256
@@ -57,11 +58,7 @@ typedef struct vfs_stat {
     uint64_t st_ctime;
 } vfs_stat_t;
 
-typedef struct vfs_dirent {
-    uint64_t d_ino;
-    uint8_t  d_type;
-    char     d_name[VFS_MAX_NAME];
-} vfs_dirent_t;
+typedef strat_dirent_t vfs_dirent_t;
 
 struct vfs_node;
 struct vfs_mount;
@@ -75,7 +72,9 @@ typedef struct vfs_node_ops {
     int     (*create)(struct vfs_node *parent, const char *name, uint32_t mode, struct vfs_node **out_child);
     int     (*mkdir)(struct vfs_node *parent, const char *name, uint32_t mode, struct vfs_node **out_child);
     int     (*unlink)(struct vfs_node *parent, const char *name);
-    int     (*readdir)(struct vfs_node *dir, uint32_t index, vfs_dirent_t *out_dirent);
+    int     (*rename)(struct vfs_node *old_parent, const char *old_name,
+                      struct vfs_node *new_parent, const char *new_name);
+    int     (*readdir)(struct vfs_node *dir, uint64_t *index, vfs_dirent_t *out_dirent);
     int     (*stat)(struct vfs_node *node, vfs_stat_t *out_st);
     int     (*sync)(struct vfs_node *node);
     int     (*truncate)(struct vfs_node *node, uint64_t new_size);
@@ -145,6 +144,7 @@ int64_t     vfs_lseek(file_t *file, int64_t offset, int whence);
 int         vfs_close(file_t *file);
 int         vfs_mkdir(const char *path, int mode);
 int         vfs_unlink(const char *path);
+int         vfs_rename(const char *old_path, const char *new_path);
 int         vfs_stat(const char *path, vfs_stat_t *st);
 int         vfs_sync(void);
 

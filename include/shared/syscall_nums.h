@@ -70,6 +70,7 @@
 #define O_TRUNC             0x0200
 #define O_APPEND            0x0400
 #define O_NONBLOCK          0x0800
+#define O_DIRECTORY         0x10000
 #define O_CLOEXEC           0x80000
 
 /* Seek whence */
@@ -108,6 +109,12 @@
 #define SHUT_RD             0
 #define SHUT_WR             1
 #define SHUT_RDWR           2
+
+typedef struct strat_dirent {
+    uint64_t d_ino;
+    uint8_t d_type;
+    char d_name[64];
+} strat_dirent_t;
 
 typedef struct strat_sysinfo {
     uint64_t uptime_ms;

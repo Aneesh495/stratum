@@ -17,5 +17,9 @@ and sysinfo. Reserved calls return `ENOSYS`. Ring 3 faults exit with
 `128 + vector`. If `waitpid` cannot copy the exit status to the caller,
 it returns `EFAULT` and the child remains available to reap.
 
+Open a directory with `O_RDONLY | O_DIRECTORY`. `readdir` returns one entry,
+zero at end of directory, or a negative error. A failed user copy leaves
+the directory cursor unchanged.
+
 The kernel starts the embedded native init binary. General exec, native user
 threads, TLS setup, and file-backed mapping are pending.

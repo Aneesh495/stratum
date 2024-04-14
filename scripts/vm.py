@@ -21,7 +21,8 @@ FIRMWARE_PATHS = (
 
 
 def tool(name):
-    return os.environ.get(name.replace("-", "_").upper()) or shutil.which(name) or name
+    override = {"qemu-system-x86_64": "QEMU", "ld.lld": "LD_LLD"}.get(name, name.replace("-", "_").upper())
+    return os.environ.get(override) or shutil.which(name) or name
 
 
 def firmware():

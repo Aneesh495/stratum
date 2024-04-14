@@ -54,6 +54,10 @@ static _Noreturn void start_system(void) {
 
     pci_init();
     virtio_blk_init();
+    if (strcmp(g_boot_handoff.cmdline, "driver=blk-wrap\n") == 0) {
+        extern void block_wrap_test(void);
+        block_wrap_test();
+    }
     virtio_net_init();
     vfs_init();
     stratafs_init();

@@ -122,6 +122,14 @@ static inline int open(const char *path, int flags, int mode) {
     return (int)syscall3(SYS_open, (uint64_t)path, (uint64_t)flags, (uint64_t)mode);
 }
 
+static inline int rename(const char *old_path, const char *new_path) {
+    return (int)syscall2(SYS_rename, (uint64_t)old_path, (uint64_t)new_path);
+}
+
+static inline int readdir(int fd, strat_dirent_t *entry) {
+    return (int)syscall2(SYS_readdir, (uint64_t)fd, (uint64_t)entry);
+}
+
 static inline int close(int fd) {
     return (int)syscall1(SYS_close, (uint64_t)fd);
 }

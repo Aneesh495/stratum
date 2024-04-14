@@ -22,9 +22,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build and VM dependencies
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
-          apt_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          sources="$RUNNER_TEMP/stratum-ubuntu.list"
+          cat > "$sources" <<'EOF'
+          deb https://archive.ubuntu.com/ubuntu noble main universe
+          deb https://archive.ubuntu.com/ubuntu noble-updates main universe
+          deb https://security.ubuntu.com/ubuntu noble-security main universe
+          EOF
+          apt_options=(-o "Dir::Etc::sourcelist=$sources" -o Dir::Etc::sourceparts=-)
+          apt_options+=(-o Acquire::Languages=none -o Acquire::Retries=2 -o Acquire::https::Timeout=25)
           sudo apt-get "${apt_options[@]}" update
           sudo apt-get "${apt_options[@]}" install -y --no-install-recommends clang lld libclang-rt-dev nasm qemu-system-x86 ovmf mtools
       - name: Check toolchain and documentation
@@ -36,6 +43,7 @@ jobs:
           make -j2 smoke
           make -j2 test-boot
           python3 scripts/test_diagnostics.py all
+          python3 scripts/test_block_wrap.py
       - name: Run the extended storage campaign
         if: github.event_name == 'workflow_dispatch' && inputs.storage_campaign
         run: python3 scripts/test_wal_crash.py --repeats 10

@@ -24,6 +24,17 @@ process_t *process_get_current(void) {
     return curr ? curr->process : NULL;
 }
 
+uint32_t process_active_count(void) {
+    uint64_t flags;
+    spin_lock_irqsave(&g_process_lock, &flags);
+    uint32_t count = 0;
+    for (unsigned i = 0; i < PROCESS_MAX_COUNT; i++) {
+        if (g_process_pool[i].state == PROC_STATE_ALIVE) count++;
+    }
+    spin_unlock_irqrestore(&g_process_lock, flags);
+    return count;
+}
+
 process_t *process_find(uint32_t pid) {
     uint64_t flags;
     spin_lock_irqsave(&g_process_lock, &flags);

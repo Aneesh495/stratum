@@ -41,15 +41,25 @@ def test_profile(cpus, memory, log_dir, checker):
             expected = b"durable-alpha\r\ndurable-beta\r\n"
             if shell(guest, "cat /proof/token") != expected:
                 raise RuntimeError("payload mismatch before reboot")
+            require(b"token\r\n", shell(guest, "ls /proof"))
+            if shell(guest, "write /proof/other replace-me"):
+                raise RuntimeError("replacement setup failed")
+            if shell(guest, "mv /proof/token /proof/other"):
+                raise RuntimeError("atomic replacement failed")
+            if shell(guest, "mv /proof/other /moved"):
+                raise RuntimeError("cross-directory rename failed")
+            require(b"err=-2", shell(guest, "stat /proof/token"))
+            require(b"err=-2", shell(guest, "stat /proof/other"))
             guest.interrupt()
 
         subprocess.run([checker, str(disk)], check=True, timeout=10)
         with running(cmd, log_dir / f"{name}-reboot.log") as guest:
             guest.expect(PROMPT)
-            if shell(guest, "cat /proof/token") != expected:
-                raise RuntimeError("durable payload mismatch after reboot")
-            require(b"File '/proof/token' unlinked.", shell(guest, "rm /proof/token"))
-            require(b"err=-2", shell(guest, "stat /proof/token"))
+            if shell(guest, "cat /moved") != expected:
+                raise RuntimeError("durable renamed payload mismatch after reboot")
+            require(b"moved\r\n", shell(guest, "ls /"))
+            require(b"File '/moved' unlinked.", shell(guest, "rm /moved"))
+            require(b"err=-2", shell(guest, "stat /moved"))
         subprocess.run([checker, str(disk)], check=True, timeout=10)
     print(f"[PASS] {name}: shell, disk interruption/reboot, payload, unlink, and raw disk checks", flush=True)
 

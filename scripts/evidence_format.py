@@ -16,6 +16,7 @@ COMMANDS = {
     "boot": ("python3", "scripts/test_boot.py"),
     "matrix": ("python3", "scripts/test_smoke.py", "--matrix"),
     "diagnostics": ("python3", "scripts/test_diagnostics.py", "all"),
+    "drivers": ("python3", "scripts/test_block_wrap.py"),
     "recovery": ("python3", "scripts/test_recovery.py"),
     "ledger": ("python3", "scripts/test_ledger.py"),
     "replication": ("python3", "scripts/test_replication.py"),
@@ -27,7 +28,7 @@ REQUIRED_TRANSCRIPTS = (
     ["boot/no-disk.log", "boot/phoff-overflow.log", "boot/file-larger-than-memory.log"]
     + [f"smoke/{n}cpu-{mem}-{stage}.log" for n, mem in PROFILES for stage in ("boot", "reboot")]
     + [f"diagnostics/stress-{n}.log" for n in (1, 2, 4, 8)]
-    + ["diagnostics/faults-2.log", "recovery/setup.log", "recovery/interrupted.log",
+    + ["drivers/blk-wrap.log", "diagnostics/faults-2.log", "recovery/setup.log", "recovery/interrupted.log",
        "recovery/rejected.log", "recovery/replayed.log", "recovery/bad-superblock.log",
        "ledger/before-stop.log", "ledger/after-restart.log", "replication/primary.log",
        "replication/follower.log", "replication/follower-reboot.log", "replication/ethernet.pcap"]

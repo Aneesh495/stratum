@@ -11,6 +11,7 @@ static spinlock_t        g_vfs_lock;
 static int64_t vfs_file_read(file_t *file, void *buf, size_t count) {
     if (!file || !file->priv || !buf) return -STRATUM_EINVAL;
     if ((file->flags & 3U) == O_WRONLY) return -STRATUM_EBADF;
+    if (file->flags & O_DIRECTORY) return -STRATUM_EISDIR;
     vfs_node_t *node = (vfs_node_t *)file->priv;
     if (!node->ops || !node->ops->read) return -STRATUM_ENOSYS;
 
@@ -319,7 +320,8 @@ static int vfs_resolve_parent(const char *path, vfs_node_t **out_parent, char *o
 
 int vfs_open(const char *path, int flags, int mode, file_t **out_file) {
     if (!path || !out_file || (flags & 3) == 3 ||
-        ((flags & O_TRUNC) && (flags & 3) == O_RDONLY)) return -STRATUM_EINVAL;
+        ((flags & O_TRUNC) && (flags & 3) == O_RDONLY) ||
+        ((flags & O_DIRECTORY) && (flags & (3 | O_CREAT | O_TRUNC | O_APPEND)))) return -STRATUM_EINVAL;
 
     vfs_node_t *node = NULL;
     int res = vfs_resolve_path(path, &node);
@@ -348,6 +350,11 @@ int vfs_open(const char *path, int flags, int mode, file_t **out_file) {
     } else if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) {
         vfs_node_release(node);
         return -STRATUM_EEXIST;
+    }
+
+    if ((flags & O_DIRECTORY) && node->type != VFS_TYPE_DIR) {
+        vfs_node_release(node);
+        return -STRATUM_ENOTDIR;
     }
 
     if (node->ops && node->ops->open) {
@@ -388,6 +395,7 @@ int64_t vfs_write(file_t *file, const void *buf, size_t count) {
 int64_t vfs_lseek(file_t *file, int64_t offset, int whence) {
     if (!file || file->type != FILE_TYPE_VFS || !file->priv) return -STRATUM_EBADF;
     vfs_node_t *node = (vfs_node_t *)file->priv;
+    if (file->flags & O_DIRECTORY) return -STRATUM_ESPIPE;
 
     uint64_t flags;
     spin_lock_irqsave(&file->lock, &flags);
@@ -468,6 +476,22 @@ int vfs_unlink(const char *path) {
 
     res = parent->ops->unlink(parent, name);
     vfs_node_release(parent);
+    return res;
+}
+
+int vfs_rename(const char *old_path, const char *new_path) {
+    vfs_node_t *old_parent, *new_parent;
+    char old_name[VFS_MAX_NAME], new_name[VFS_MAX_NAME];
+    int res = vfs_resolve_parent(old_path, &old_parent, old_name);
+    if (res != 0) return res;
+    res = vfs_resolve_parent(new_path, &new_parent, new_name);
+    if (res == 0) {
+        if (old_parent->mount != new_parent->mount) res = -STRATUM_EXDEV;
+        else if (!old_parent->ops || !old_parent->ops->rename) res = -STRATUM_ENOTSUP;
+        else res = old_parent->ops->rename(old_parent, old_name, new_parent, new_name);
+        vfs_node_release(new_parent);
+    }
+    vfs_node_release(old_parent);
     return res;
 }
 

@@ -515,6 +515,17 @@ static bool is_directory(const stratafs_disk_inode_t *inode) {
     return (inode->mode & STRATAFS_MODE_MASK) == VFS_MODE_IFDIR;
 }
 
+static bool valid_directory_entry(const stratafs_t *fs, const stratafs_disk_dirent_t *entry) {
+    if (!entry->inode_num) return true;
+    if (entry->record_len != sizeof(*entry) || entry->name_len == 0 ||
+        entry->name_len >= VFS_MAX_NAME || entry->inode_num >= fs->sb.total_inodes ||
+        (entry->file_type != STRATAFS_FT_DIR && entry->file_type != STRATAFS_FT_REG)) return false;
+    for (unsigned i = 0; i < entry->name_len; i++) {
+        if (!entry->name[i] || entry->name[i] == '/') return false;
+    }
+    return true;
+}
+
 static int find_dirent(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inode_t *dir,
                        const char *name, uint8_t *buf, uint32_t *block, uint32_t *index,
                        bool find_empty) {
@@ -533,11 +544,7 @@ static int find_dirent(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inode_t *
         stratafs_disk_dirent_t *entries = (stratafs_disk_dirent_t *)buf;
         for (uint32_t i = 0; i < STRATAFS_BLOCK_SIZE / sizeof(*entries); i++) {
             const stratafs_disk_dirent_t *de = &entries[i];
-            if (de->inode_num != 0 &&
-                (de->record_len != sizeof(*de) || de->name_len == 0 ||
-                 de->name_len >= sizeof(de->name) || de->inode_num >= fs->sb.total_inodes)) {
-                return -STRATUM_EIO;
-            }
+            if (!valid_directory_entry(fs, de)) return -STRATUM_EIO;
             if ((find_empty && de->inode_num == 0) ||
                 (!find_empty && de->inode_num != 0 && de->name_len == name_len &&
                  memcmp(de->name, name, name_len) == 0)) {
@@ -797,13 +804,117 @@ static int stratafs_vfs_unlink(vfs_node_t *parent, const char *name) {
     return res;
 }
 
+static int stratafs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
+                               vfs_node_t *new_parent, const char *new_name) {
+    stratafs_t *fs = old_parent->mount->fs_priv;
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+
+    stratafs_disk_inode_t old_dir, new_dir, source, replaced;
+    bool same_parent = old_parent->inode_num == new_parent->inode_num;
+    stratafs_disk_inode_t *destination = same_parent ? &old_dir : &new_dir;
+    journal_tx_t *tx = NULL;
+    uint32_t src, dst;
+
+    int res = load_node(fs, old_parent, &old_dir);
+    if (res != 0) goto out;
+    if (!same_parent) {
+        res = load_node(fs, new_parent, &new_dir);
+        if (res != 0) goto out;
+    }
+    res = stratafs_dir_lookup(fs, &old_dir, old_name, &src);
+    if (res != 0) goto out;
+    if (same_parent && strcmp(old_name, new_name) == 0) goto out;
+    res = stratafs_read_inode(fs, src, &source);
+    if (res != 0) goto out;
+    if ((source.mode & STRATAFS_MODE_MASK) != VFS_MODE_IFREG) {
+        res = -STRATUM_EISDIR;
+        goto out;
+    }
+
+    res = stratafs_dir_lookup(fs, destination, new_name, &dst);
+    bool replace = res == 0;
+    if (!replace && res != -STRATUM_ENOENT) goto out;
+    if (replace) {
+        if (src == dst) goto out;
+        res = stratafs_read_inode(fs, dst, &replaced);
+        if (res != 0) goto out;
+        if ((replaced.mode & STRATAFS_MODE_MASK) != VFS_MODE_IFREG) {
+            res = -STRATUM_EISDIR;
+            goto out;
+        }
+        if (fs->open_count[dst]) {
+            res = -STRATUM_EBUSY;
+            goto out;
+        }
+    }
+
+    res = journal_begin(&fs->journal, &tx);
+    if (res == 0 && replace) {
+        res = remove_dirent(fs, tx, destination, new_name);
+        if (res == 0) res = free_file_blocks(fs, tx, &replaced);
+        if (res == 0) res = stratafs_free_inode(fs, tx, dst);
+    }
+    if (res == 0) res = remove_dirent(fs, tx, &old_dir, old_name);
+    if (res == 0) {
+        res = stratafs_dir_add(fs, tx, (uint32_t)new_parent->inode_num,
+                              destination, new_name, src, STRATAFS_FT_REG);
+    }
+out:
+    res = finish_tx(fs, tx, res);
+    spin_unlock_irqrestore(&fs->lock, flags);
+    return res;
+}
+
+static int stratafs_vfs_readdir(vfs_node_t *node, uint64_t *index, vfs_dirent_t *entry) {
+    stratafs_t *fs = node->mount->fs_priv;
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    stratafs_disk_inode_t inode;
+    int res = load_node(fs, node, &inode);
+    if (res == 0 && !is_directory(&inode)) res = -STRATUM_ENOTDIR;
+    if (res == 0 && (inode.size > STRATAFS_MAX_FILE_SIZE || inode.size % STRATAFS_BLOCK_SIZE)) res = -STRATUM_EIO;
+
+    stratafs_disk_dirent_t *entries = NULL;
+    if (res == 0 && *index < inode.size / sizeof(*entries)) {
+        entries = kmalloc(STRATAFS_BLOCK_SIZE);
+        if (!entries) res = -STRATUM_ENOMEM;
+    }
+    uint64_t slots = STRATAFS_BLOCK_SIZE / sizeof(*entries);
+    while (res == 0 && entries && *index < inode.size / sizeof(*entries)) {
+        uint32_t block;
+        res = stratafs_get_block_mapping(fs, NULL, &inode, (uint32_t)(*index / slots), false, &block);
+        if (res == 0) res = block ? stratafs_read_block(fs, block, entries) : -STRATUM_EIO;
+        if (res != 0) break;
+        do {
+            const stratafs_disk_dirent_t *record = &entries[*index % slots];
+            (*index)++;
+            if (!valid_directory_entry(fs, record)) {
+                res = -STRATUM_EIO;
+                break;
+            }
+            if (record->inode_num) {
+                entry->d_ino = record->inode_num;
+                entry->d_type = record->file_type;
+                memcpy(entry->d_name, record->name, record->name_len);
+                entry->d_name[record->name_len] = 0;
+                res = 1;
+                break;
+            }
+        } while (*index % slots != 0);
+    }
+    kfree(entries);
+    spin_unlock_irqrestore(&fs->lock, flags);
+    return res;
+}
+
 static int stratafs_vfs_open(vfs_node_t *node, uint32_t open_flags) {
     stratafs_t *fs = node->mount->fs_priv;
     uint64_t flags;
     spin_lock_irqsave(&fs->lock, &flags);
     stratafs_disk_inode_t inode;
     int res = load_node(fs, node, &inode);
-    if (res == 0 && is_directory(&inode)) res = -STRATUM_EISDIR;
+    if (res == 0 && is_directory(&inode) && !(open_flags & O_DIRECTORY)) res = -STRATUM_EISDIR;
     if (res == 0 && (open_flags & O_TRUNC)) {
         journal_tx_t *tx = NULL;
         res = journal_begin(&fs->journal, &tx);
@@ -898,7 +1009,8 @@ const vfs_node_ops_t g_stratafs_node_ops = {
     .create   = stratafs_vfs_create,
     .mkdir    = stratafs_vfs_mkdir,
     .unlink   = stratafs_vfs_unlink,
-    .readdir  = NULL,
+    .rename   = stratafs_vfs_rename,
+    .readdir  = stratafs_vfs_readdir,
     .stat     = stratafs_vfs_stat,
     .sync     = stratafs_vfs_sync,
     .truncate = NULL,
