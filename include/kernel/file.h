@@ -65,6 +65,8 @@ void fd_table_init(fd_table_t *table);
 void fd_table_copy(fd_table_t *dst, const fd_table_t *src);
 void fd_table_destroy(fd_table_t *table);
 int  fd_alloc(fd_table_t *table, file_t *file);
+int  fd_alloc_flags(fd_table_t *table, file_t *file, uint32_t flags);
+void fd_close_exec(fd_table_t *table);
 int  fd_install(fd_table_t *table, int fd, file_t *file);
 file_t *fd_get(fd_table_t *table, int fd);
 int  fd_close(fd_table_t *table, int fd);

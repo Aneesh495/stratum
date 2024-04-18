@@ -41,14 +41,14 @@ def cases(kernel):
     ]
 
 
-def main():
-    logs = Path("build/boot")
+def run(logs):
     with running(command(BOOT_IMAGE, cpus=2), logs / "no-disk.log") as guest:
         reply = guest.expect(PROMPT)
         if b"Root mount failed" not in reply:
             raise RuntimeError("missing no-disk diagnostic")
 
     kernel = Path("build/stratum.elf").read_bytes()
+    rejected = []
     with tempfile.TemporaryDirectory(dir="build") as directory:
         image = Path(directory) / BOOT_IMAGE.name
         mutated = Path(directory) / "stratum.elf"
@@ -61,8 +61,10 @@ def main():
                 transcript = guest.expect(error)
                 if b"Kernel entered at higher-half entry point" in transcript:
                     raise RuntimeError(f"loader entered the kernel for {name}")
+            rejected.append(name)
             print(f"[PASS] rejected {name}", flush=True)
+    return rejected
 
 
 if __name__ == "__main__":
-    main()
+    run(Path("build/boot"))

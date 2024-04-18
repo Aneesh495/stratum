@@ -35,6 +35,7 @@ typedef struct thread {
     thread_prio_t    priority;
     uint32_t         assigned_cpu;
     volatile bool    on_cpu;
+    bool             pinned;
 
     uint64_t         timeslice_remaining;
     uint64_t         runtime_ticks;
@@ -73,6 +74,7 @@ void      sched_init(void);
 void      sched_init_cpu(uint32_t cpu_id);
 void      sched_finish_switch(void);
 thread_t *thread_create(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio);
+thread_t *thread_create_on_cpu(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio, uint32_t cpu);
 thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio, pml4_t *as, struct process *process);
 void      thread_exit(void);
 void      thread_yield(void);

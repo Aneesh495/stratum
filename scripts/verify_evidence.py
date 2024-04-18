@@ -73,6 +73,11 @@ def verify(root):
               "durable-alpha\ndurable-beta\n" in reboot and "err=-2" in reboot and
               "mv /proof/token /proof/other" in boot and "File '/moved' unlinked." in reboot,
               f"{name}: shell or recovery mismatch")
+    for cpus in (4, 8):
+        log = read(f"transcripts/exec/{cpus}cpu.log")
+        check("ONE | TWO\n" in log and "FIRST LINE\nSECOND\n" in log and
+              "fork/exec/wait cycles=10000 with argv, envp, CLOEXEC and resource recovery" in log,
+              f"{cpus} CPUs: shell or exec lifecycle evidence mismatch")
     for cpus in (1, 2, 4, 8):
         log = read(f"transcripts/diagnostics/stress-{cpus}.log")
         check("64 fork/reap cycles" in log and "128 demand-zero pages" in log and

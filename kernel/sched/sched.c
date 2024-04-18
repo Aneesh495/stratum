@@ -69,7 +69,7 @@ static thread_t *rq_steal_work(uint32_t my_cpu) {
                 thread_t *prev = NULL;
                 thread_t *curr = other_rq->queues[p];
                 while (curr) {
-                    if (!curr->on_cpu && curr->state == THREAD_STATE_READY) {
+                    if (!curr->pinned && !curr->on_cpu && curr->state == THREAD_STATE_READY) {
                         /* Dequeue curr from other_rq */
                         if (prev) {
                             prev->next = curr->next;
@@ -107,7 +107,7 @@ void sched_finish_switch(void) {
         rq->prev_thread = NULL;
         spin_unlock(&rq->lock);
         if (prev->state == THREAD_STATE_ZOMBIE) {
-            if (prev->process) process_finish_exit(prev->process);
+            process_t *process = prev->process;
             if (prev->kernel_stack_base) {
                 pmm_free_pages(virt_to_phys((void *)prev->kernel_stack_base), 2);
                 prev->kernel_stack_base = 0;
@@ -115,6 +115,7 @@ void sched_finish_switch(void) {
             spin_lock(&g_thread_pool_lock);
             prev->state = THREAD_STATE_UNUSED;
             spin_unlock(&g_thread_pool_lock);
+            if (process) process_finish_exit(process);
         }
     }
 }
@@ -157,7 +158,9 @@ void sched_init(void) {
     kprintf("[SCHED] Preemptive SMP Scheduler initialized (O(1) priority queues, work stealing enabled)\n");
 }
 
-thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio, pml4_t *as, process_t *process) {
+static thread_t *thread_create_internal(const char *name, void (*entry)(void *), void *arg,
+                                        thread_prio_t prio, pml4_t *as, process_t *process,
+                                        int fixed_cpu) {
     if (!entry) return NULL;
 
     uint64_t flags;
@@ -182,6 +185,7 @@ thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg,
     strncpy(t->name, name ? name : "kthread", sizeof(t->name) - 1);
     t->priority = prio;
     t->on_cpu = false;
+    t->pinned = fixed_cpu >= 0;
     t->address_space = as;
     t->process = process;
 
@@ -210,12 +214,12 @@ thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg,
     t->saved_rsp = (uint64_t)sp;
 
     /* Pick target CPU with lowest load */
-    uint32_t target_cpu = 0;
+    uint32_t target_cpu = t->pinned ? (uint32_t)fixed_cpu : 0;
     uint32_t min_running = 0xFFFFFFFF;
     uint32_t online = smp_get_online_cpus();
     if (online == 0) online = 1;
 
-    for (uint32_t c = 0; c < online; c++) {
+    for (uint32_t c = 0; !t->pinned && c < online; c++) {
         spin_lock(&g_runqueues[c].lock);
         uint32_t running = g_runqueues[c].nr_running;
         spin_unlock(&g_runqueues[c].lock);
@@ -242,6 +246,17 @@ thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg,
     }
 
     return t;
+}
+
+thread_t *thread_create_on_cpu(const char *name, void (*entry)(void *), void *arg,
+                               thread_prio_t prio, uint32_t cpu) {
+    if (cpu >= smp_get_online_cpus()) return NULL;
+    return thread_create_internal(name, entry, arg, prio, NULL, NULL, (int)cpu);
+}
+
+thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg,
+                             thread_prio_t prio, pml4_t *as, process_t *process) {
+    return thread_create_internal(name, entry, arg, prio, as, process, -1);
 }
 
 thread_t *thread_create(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio) {

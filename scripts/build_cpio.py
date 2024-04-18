@@ -7,6 +7,7 @@ fixed inodes, and zero host filesystem leakage.
 
 import os
 import sys
+from pathlib import Path
 
 
 def make_entry(name, data=b"", mode=0o100755, ino=1):
@@ -22,14 +23,19 @@ def make_entry(name, data=b"", mode=0o100755, ino=1):
     return entry
 
 
-def build_archive(init_elf_path, out_path):
-    with open(init_elf_path, "rb") as f:
-        elf_data = f.read()
+def build_archive(init_elf_path, out_path, extra=()):
+    files = {"init": init_elf_path}
+    for spec in extra:
+        name, sep, path = spec.partition("=")
+        if not sep or not name or not path or name in files or name in (".", "..") or "/" in name:
+            raise ValueError(f"invalid archive entry {spec!r}")
+        files[name] = path
 
     archive = bytearray()
     archive.extend(make_entry(".", b"", mode=0o040755, ino=1))
     archive.extend(make_entry("bin", b"", mode=0o040755, ino=2))
-    archive.extend(make_entry("bin/init", elf_data, mode=0o100755, ino=3))
+    for ino, (name, path) in enumerate(sorted(files.items()), 3):
+        archive.extend(make_entry(f"bin/{name}", Path(path).read_bytes(), ino=ino))
     archive.extend(make_entry("TRAILER!!!", b"", mode=0, ino=0))
 
     while len(archive) % 512 != 0:
@@ -42,9 +48,9 @@ def build_archive(init_elf_path, out_path):
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: build_cpio.py <input_elf> <output_cpio>")
+        print("Usage: build_cpio.py <input_elf> <output_cpio> [<name>=<elf> ...]")
         return 1
-    build_archive(sys.argv[1], sys.argv[2])
+    build_archive(sys.argv[1], sys.argv[2], sys.argv[3:])
     return 0
 
 

@@ -72,6 +72,13 @@ test-storage: image
 test-storage-crash: image
 	@$(PYTHON) scripts/test_wal_crash.py --repeats 10
 
+.PHONY: test-boot-campaign test-exec
+test-boot-campaign: image
+	@$(PYTHON) scripts/test_boot_campaign.py
+
+test-exec: image
+	@$(PYTHON) scripts/test_exec.py
+
 test-net demo: image
 	@$(PYTHON) scripts/test_ledger.py
 	@$(PYTHON) scripts/test_replication.py

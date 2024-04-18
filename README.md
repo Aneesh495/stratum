@@ -22,6 +22,7 @@ mkdir /notes
 write /notes/hello hello from Stratum
 ls /notes
 cat /notes/hello
+cat /notes/hello | upper
 ledgerput first payload
 ```
 
@@ -45,6 +46,8 @@ The service acknowledges an append after the guest filesystem flushes it. Identi
 | `make test fuzz` | Sanitizer-enabled host models and parser mutations |
 | `make smoke` | Ring 3 shell, real WAL replay and corruption rejection, TCP ledger reboot, and two-guest Ethernet transfer with a dropped reply |
 | `make test-boot` | Nine QEMU configurations and 17 malformed loader images |
+| `make test-boot-campaign` | 45 fresh boots with per-CPU probes, entry debugger checks, and 128 malformed loader or handoff inputs |
+| `make test-exec` | Shell pipelines, disk redirection, and 10,000 real fork/exec/wait cycles on each of 4 and 8 vCPUs |
 | `make test-abi test-storage test-faults` | Guest ABI, COW, pipes, filesystem paths, and deliberate trap handling |
 | `make test-drivers` | 150,000 virtio-blk reads with two full ring wraps |
 | `make test-storage-crash` | 100 forced VM interruptions across ten WAL stages |

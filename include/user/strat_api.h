@@ -107,6 +107,10 @@ static inline int mprotect(void *addr, size_t length, unsigned protection) {
     return (int)syscall3(SYS_mprotect, (uint64_t)addr, length, protection);
 }
 
+static inline int execve(const char *path, const char *const *argv, const char *const *envp) {
+    return (int)syscall3(SYS_execve, (uint64_t)path, (uint64_t)argv, (uint64_t)envp);
+}
+
 void exit(int status) __attribute__((noreturn));
 
 /* File System API */

@@ -162,7 +162,7 @@ static int64_t sys_open_impl(const char *u_path, int flags, int mode) {
     int res = vfs_open(kpath, flags, mode, &f);
     if (res != 0) return res;
 
-    int fd = fd_alloc(&proc->fds, f);
+    int fd = fd_alloc_flags(&proc->fds, f, flags & O_CLOEXEC);
     if (fd < 0) {
         vfs_close(f);
         return fd;
@@ -430,6 +430,10 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
     case SYS_fork: {
         return process_fork(regs);
     }
+
+    case SYS_execve:
+        return process_exec((const char *)regs->rdi, (const char *const *)regs->rsi,
+                            (const char *const *)regs->rdx);
 
     case SYS_waitpid: {
         int32_t pid = (int32_t)regs->rdi;

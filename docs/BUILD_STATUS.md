@@ -4,10 +4,10 @@ The current verification baseline covers the normal QEMU image and an opt-in dia
 
 | Gate | Exercised in regression | Still required |
 | --- | --- | --- |
-| A01 | Nine QEMU profiles, 17 malformed EFI images, and a shell with no data disk | Repeated boots, per-CPU workload probes, debugger evidence, and the remaining malformed loader and handoff cases |
+| A01 | 45 fresh boots with per-CPU work, 17 malformed EFI images, 111 debugger-injected handoff mutations, and entry register inspection | Hosted campaign on the release candidate |
 | A02 | 2 million host model operations, concurrent guest allocator checks, 51,200 reconciled demand-zero allocations across four diagnostic profiles, and fork/COW protection | Cross-CPU mapping replacement and the remaining memory oracles |
 | A03 | Preemption and workers on the SMP diagnostic path | User-thread API, live population and race campaigns |
-| A04 | Ring 3 entry, 64 fork/reap cycles per diagnostic profile, invalid status pointer, and a faulting child | Exec, native threads, TLS, and the full boundary corpus |
+| A04 | Ring 3 entry, 10,000 real fork/exec/wait cycles on each of 4 and 8 CPUs, argument and environment passing, close-on-exec, resource reconciliation, and fault isolation | Native threads, TLS, and the full boundary corpus |
 | A05 | Pipe transfer, readiness, EOF, and descriptor duplication | Message channels and full partial-I/O and readiness-race workloads |
 | A06 | 150,000 real virtio-blk reads and two full block-queue wraps, plus virtio-net frames on the wire | Network queue wraps, cold-device workloads, saturation, and reset recovery |
 | A07 | Directory enumeration, atomic regular-file rename, indirect-block I/O, 100 stops across ten WAL stages, and corrupt-image rejection | Full mixed workload, modeled crash-state count, and independent namespace traversal |

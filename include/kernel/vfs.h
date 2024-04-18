@@ -145,6 +145,7 @@ int         vfs_close(file_t *file);
 int         vfs_mkdir(const char *path, int mode);
 int         vfs_unlink(const char *path);
 int         vfs_rename(const char *old_path, const char *new_path);
+int         vfs_fstat(file_t *file, vfs_stat_t *st);
 int         vfs_stat(const char *path, vfs_stat_t *st);
 int         vfs_sync(void);
 

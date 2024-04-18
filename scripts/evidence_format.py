@@ -3,9 +3,10 @@
 from hashlib import sha256
 
 
-SCHEMA = 1
+SCHEMA = 2
 ARTIFACTS = (
     "BOOTX64.EFI", "stratum.elf", "initramfs.cpio", "user_init.elf", "user_test.elf",
+    "user_tools.elf", "user_exec_campaign.elf",
     "images/stratum-boot.img", "images/stratum-data.img",
 )
 COMMANDS = {
@@ -14,6 +15,7 @@ COMMANDS = {
     "build-a": ("make", "-j2", "image"),
     "build-b": ("make", "-j2", "image"),
     "boot": ("python3", "scripts/test_boot.py"),
+    "exec": ("python3", "scripts/test_exec.py"),
     "matrix": ("python3", "scripts/test_smoke.py", "--matrix"),
     "diagnostics": ("python3", "scripts/test_diagnostics.py", "all"),
     "drivers": ("python3", "scripts/test_block_wrap.py"),
@@ -27,6 +29,7 @@ PROFILES = (
 REQUIRED_TRANSCRIPTS = (
     ["boot/no-disk.log", "boot/phoff-overflow.log", "boot/file-larger-than-memory.log"]
     + [f"smoke/{n}cpu-{mem}-{stage}.log" for n, mem in PROFILES for stage in ("boot", "reboot")]
+    + [f"exec/{n}cpu.log" for n in (4, 8)]
     + [f"diagnostics/stress-{n}.log" for n in (1, 2, 4, 8)]
     + ["drivers/blk-wrap.log", "diagnostics/faults-2.log", "recovery/setup.log", "recovery/interrupted.log",
        "recovery/rejected.log", "recovery/replayed.log", "recovery/bad-superblock.log",

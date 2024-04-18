@@ -1,11 +1,14 @@
+#include <shared/errno.h>
+#include <stdbool.h>
 #include <user/strat_api.h>
 
 extern void u_printf(const char *fmt, ...);
+extern void u_dprintf(int fd, const char *fmt, ...);
 extern int ledgerd_run(void);
 extern int ledger_put(const char *id, const char *value);
 extern int ledger_pull(const char *peer, const char *id);
 extern size_t strlen(const char *s);
-extern char *strncpy(char *dest, const char *src, size_t n);
+extern void *memcpy(void *dest, const void *src, size_t n);
 extern int strcmp(const char *s1, const char *s2);
 
 static void cmd_help(void) {
@@ -150,34 +153,20 @@ static int cmd_write(int argc, char **argv) {
     return result;
 }
 
-int sh_execute_cmd(const char *cmd_line) {
-    if (!cmd_line || !cmd_line[0]) return 0;
+#define SH_MAX_STAGES 4
+#define SH_MAX_ARGS 8
+#define SH_LINE_CAPACITY 128
+#define SH_EXTERNAL (-1000)
 
-    char buf[128];
-    strncpy(buf, cmd_line, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
+typedef struct {
+    char *argv[SH_MAX_ARGS + 1];
+    int argc;
+    char *input;
+    char *output;
+    int output_flags;
+} sh_stage_t;
 
-    char *argv[8];
-    int argc = 0;
-    char *p = buf;
-
-    while (*p && argc < 8) {
-        while (*p == ' ') p++;
-        if (!*p) break;
-        argv[argc++] = p;
-        while (*p && *p != ' ') p++;
-        if (*p) {
-            *p++ = '\0';
-        }
-    }
-
-    while (*p == ' ') p++;
-    if (*p) {
-        u_printf("sh: too many arguments\n");
-        return -1;
-    }
-    if (argc == 0) return 0;
-
+static int sh_builtin(int argc, char **argv) {
     if (strcmp(argv[0], "help") == 0) {
         cmd_help();
     } else if (strcmp(argv[0], "echo") == 0) {
@@ -215,9 +204,160 @@ int sh_execute_cmd(const char *cmd_line) {
     } else if (strcmp(argv[0], "write") == 0) {
         return cmd_write(argc, argv);
     } else {
-        u_printf("sh: command not found: '%s'\n", argv[0]);
-        return -1;
+        return SH_EXTERNAL;
     }
 
     return 0;
+}
+
+static bool is_separator(char ch) {
+    return !ch || ch == ' ' || ch == '\t' || ch == '<' || ch == '>' || ch == '|';
+}
+
+static int parse_pipeline(const char *line, char *words, sh_stage_t *stages) {
+    int count = 1;
+    sh_stage_t *stage = &stages[0];
+    char **redirect = NULL;
+    while (*line) {
+        if (*line == ' ' || *line == '\t') {
+            line++;
+            continue;
+        }
+        if (*line == '|') {
+            if (redirect || !stage->argc || count == SH_MAX_STAGES) return -1;
+            stage = &stages[count++];
+            line++;
+            continue;
+        }
+        if (*line == '<' || *line == '>') {
+            if (redirect) return -1;
+            if (*line++ == '<') {
+                redirect = &stage->input;
+            } else {
+                redirect = &stage->output;
+                stage->output_flags = O_WRONLY | O_CREAT | O_TRUNC;
+                if (*line == '>') {
+                    line++;
+                    stage->output_flags = O_WRONLY | O_CREAT | O_APPEND;
+                }
+            }
+            if (*redirect) return -1;
+            continue;
+        }
+        char *word = words;
+        char quote = 0;
+        while (*line && (quote || !is_separator(*line))) {
+            char ch = *line++;
+            if (ch == '\\' && quote != '\'') {
+                if (!*line) return -1;
+                *words++ = *line++;
+            } else if (quote == ch) {
+                quote = 0;
+            } else if (!quote && (ch == '\'' || ch == '"')) {
+                quote = ch;
+            } else {
+                *words++ = ch;
+            }
+        }
+        if (quote) return -1;
+        *words++ = 0;
+        if (redirect) {
+            *redirect = word;
+            redirect = NULL;
+        } else {
+            if (stage->argc == SH_MAX_ARGS) return -1;
+            stage->argv[stage->argc++] = word;
+        }
+    }
+    if (redirect) return -1;
+    if (!stage->argc) return count == 1 && !stage->input && !stage->output ? 0 : -1;
+    return count;
+}
+
+static int redirect_fd(const char *path, int flags, int dest) {
+    if (!path) return 0;
+    int fd = open(path, flags, 0644);
+    if (fd < 0) {
+        u_dprintf(2, "sh: cannot open '%s' (err=%d)\n", path, fd);
+        return fd;
+    }
+    if (fd == dest) return 0;
+    int result = dup2(fd, dest);
+    close(fd);
+    return result;
+}
+
+static void close_pipes(int pipes[][2], int count) {
+    for (int i = 0; i < count; i++) {
+        close(pipes[i][0]);
+        close(pipes[i][1]);
+    }
+}
+
+static void run_stage(sh_stage_t *stage, int pipes[][2], int count, int i) {
+    if ((i > 0 && dup2(pipes[i - 1][0], 0) < 0) ||
+        (i < count - 1 && dup2(pipes[i][1], 1) < 0)) exit(1);
+    close_pipes(pipes, count - 1);
+    if (redirect_fd(stage->input, O_RDONLY, 0) < 0 ||
+        redirect_fd(stage->output, stage->output_flags, 1) < 0) exit(1);
+    int status = sh_builtin(stage->argc, stage->argv);
+    if (status != SH_EXTERNAL) exit(status < 0 ? 1 : status);
+
+    const char *command = stage->argv[0];
+    char path[SH_LINE_CAPACITY + sizeof("/bin/")];
+    if (command[0] != '/') {
+        memcpy(path, "/bin/", sizeof("/bin/") - 1);
+        memcpy(path + sizeof("/bin/") - 1, command, strlen(command) + 1);
+        command = path;
+    }
+    int error = execve(command, (const char *const *)stage->argv, NULL);
+    u_dprintf(2, "sh: cannot execute '%s' (err=%d)\n", command, error);
+    exit(error == -STRATUM_ENOENT ? 127 : 126);
+}
+
+int sh_execute_cmd(const char *line) {
+    if (!line || strlen(line) >= SH_LINE_CAPACITY) return -1;
+    char words[SH_LINE_CAPACITY];
+    sh_stage_t stages[SH_MAX_STAGES] = {0};
+    int count = parse_pipeline(line, words, stages);
+    if (count < 0) {
+        u_dprintf(2, "sh: invalid command syntax\n");
+        return -1;
+    }
+    if (count == 0) return 0;
+    if (count == 1 && !stages[0].input && !stages[0].output) {
+        int status = sh_builtin(stages[0].argc, stages[0].argv);
+        if (status != SH_EXTERNAL) return status;
+    }
+
+    int pipes[SH_MAX_STAGES - 1][2];
+    for (int i = 0; i < count - 1; i++) {
+        if (pipe(pipes[i]) < 0) {
+            close_pipes(pipes, i);
+            u_dprintf(2, "sh: cannot create pipeline\n");
+            return 1;
+        }
+    }
+    int pids[SH_MAX_STAGES];
+    int launched = 0;
+    for (; launched < count; launched++) {
+        int pid = fork();
+        if (pid == 0) run_stage(&stages[launched], pipes, count, launched);
+        if (pid < 0) {
+            u_dprintf(2, "sh: cannot start process (err=%d)\n", pid);
+            break;
+        }
+        pids[launched] = pid;
+    }
+    close_pipes(pipes, count - 1);
+    int result = launched == count ? 0 : 1;
+    for (int i = 0; i < launched; i++) {
+        int status;
+        if (waitpid(pids[i], &status, 0) != pids[i]) {
+            result = 1;
+        } else if (i == count - 1 && !result) {
+            result = status;
+        }
+    }
+    return result;
 }

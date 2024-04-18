@@ -394,7 +394,6 @@ int64_t vfs_write(file_t *file, const void *buf, size_t count) {
 
 int64_t vfs_lseek(file_t *file, int64_t offset, int whence) {
     if (!file || file->type != FILE_TYPE_VFS || !file->priv) return -STRATUM_EBADF;
-    vfs_node_t *node = (vfs_node_t *)file->priv;
     if (file->flags & O_DIRECTORY) return -STRATUM_ESPIPE;
 
     uint64_t flags;
@@ -410,7 +409,7 @@ int64_t vfs_lseek(file_t *file, int64_t offset, int whence) {
         break;
     case SEEK_END: {
         vfs_stat_t st;
-        res = node->ops && node->ops->stat ? node->ops->stat(node, &st) : -STRATUM_ENOSYS;
+        res = vfs_fstat(file, &st);
         if (res == 0) base = (int64_t)st.st_size;
         break;
     }
@@ -495,29 +494,35 @@ int vfs_rename(const char *old_path, const char *new_path) {
     return res;
 }
 
+static int stat_node(vfs_node_t *node, vfs_stat_t *st) {
+    if (node->ops && node->ops->stat) return node->ops->stat(node, st);
+
+    memset(st, 0, sizeof(*st));
+    st->st_ino = node->inode_num;
+    st->st_mode = node->mode;
+    st->st_size = node->size;
+    st->st_nlink = 1;
+    st->st_blksize = 4096;
+    st->st_blocks = (node->size + 511) / 512;
+    st->st_atime = node->atime;
+    st->st_mtime = node->mtime;
+    st->st_ctime = node->ctime;
+    return 0;
+}
+
+int vfs_fstat(file_t *file, vfs_stat_t *st) {
+    if (!file || file->type != FILE_TYPE_VFS || !file->priv) return -STRATUM_EBADF;
+    if (!st) return -STRATUM_EINVAL;
+    return stat_node(file->priv, st);
+}
+
 int vfs_stat(const char *path, vfs_stat_t *st) {
     if (!path || !st) return -STRATUM_EINVAL;
-
-    vfs_node_t *node = NULL;
+    vfs_node_t *node;
     int res = vfs_resolve_path(path, &node);
-    if (res != 0) return res;
+    if (res) return res;
 
-    if (node->ops && node->ops->stat) {
-        res = node->ops->stat(node, st);
-    } else {
-        memset(st, 0, sizeof(vfs_stat_t));
-        st->st_ino = node->inode_num;
-        st->st_mode = node->mode;
-        st->st_size = node->size;
-        st->st_nlink = 1;
-        st->st_blksize = 4096;
-        st->st_blocks = (node->size + 511) / 512;
-        st->st_atime = node->atime;
-        st->st_mtime = node->mtime;
-        st->st_ctime = node->ctime;
-        res = 0;
-    }
-
+    res = stat_node(node, st);
     vfs_node_release(node);
     return res;
 }

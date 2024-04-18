@@ -54,6 +54,7 @@ process_t *process_get_current(void);
 uint32_t   process_active_count(void);
 process_t *process_find(uint32_t pid);
 process_t *process_create_init(user_program_t *prog);
+int        process_exec(const char *path, const char *const *argv, const char *const *envp);
 int32_t    process_fork(syscall_regs_t *regs);
 void       process_exit(int status) __attribute__((noreturn));
 void       process_finish_exit(process_t *proc);

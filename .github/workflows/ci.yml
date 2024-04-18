@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      boot_campaign:
+        description: Run 45 fresh boots and 128 malformed boot cases
+        type: boolean
+        default: false
       storage_campaign:
         description: Run the 100-interruption StrataFS campaign
         type: boolean
@@ -18,7 +22,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - name: Install build and VM dependencies
@@ -44,6 +48,10 @@ jobs:
           make -j2 test-boot
           python3 scripts/test_diagnostics.py all
           python3 scripts/test_block_wrap.py
+          python3 scripts/test_exec.py
+      - name: Run the extended boot campaign
+        if: github.event_name == 'workflow_dispatch' && inputs.boot_campaign
+        run: python3 scripts/test_boot_campaign.py
       - name: Run the extended storage campaign
         if: github.event_name == 'workflow_dispatch' && inputs.storage_campaign
         run: python3 scripts/test_wal_crash.py --repeats 10
@@ -55,5 +63,6 @@ jobs:
           path: |
             build/**/*.log
             build/replication/*.pcap
+            build/boot-campaign/*.json
             build/wal-crash-*/**/*.json
           if-no-files-found: ignore

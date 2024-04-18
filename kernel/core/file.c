@@ -5,6 +5,7 @@
 #include <kernel/uart.h>
 #include <kernel/sched.h>
 #include <shared/errno.h>
+#include <shared/syscall_nums.h>
 
 static kmem_cache_t *g_file_cache = NULL;
 
@@ -126,6 +127,26 @@ void fd_table_destroy(fd_table_t *table) {
 }
 
 int fd_alloc(fd_table_t *table, file_t *file) {
+    return fd_alloc_flags(table, file, 0);
+}
+
+void fd_close_exec(fd_table_t *table) {
+    file_t *closing[PROCESS_MAX_FDS];
+    size_t count = 0;
+    uint64_t irq;
+    spin_lock_irqsave(&table->lock, &irq);
+    for (int i = 0; i < PROCESS_MAX_FDS; i++) {
+        if (table->files[i] && (table->flags[i] & O_CLOEXEC)) {
+            closing[count++] = table->files[i];
+            table->files[i] = NULL;
+            table->flags[i] = 0;
+        }
+    }
+    spin_unlock_irqrestore(&table->lock, irq);
+    for (size_t i = 0; i < count; i++) file_close(closing[i]);
+}
+
+int fd_alloc_flags(fd_table_t *table, file_t *file, uint32_t descriptor_flags) {
     if (!table || !file) return -STRATUM_EINVAL;
 
     uint64_t flags;
@@ -134,7 +155,7 @@ int fd_alloc(fd_table_t *table, file_t *file) {
     for (int i = 0; i < PROCESS_MAX_FDS; i++) {
         if (!table->files[i]) {
             table->files[i] = file;
-            table->flags[i] = 0;
+            table->flags[i] = descriptor_flags;
             spin_unlock_irqrestore(&table->lock, flags);
             return i;
         }

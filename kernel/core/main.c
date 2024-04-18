@@ -37,10 +37,39 @@
 #include <shared/sha256.h>
 #include <kernel/x86_64.h>
 
+int initramfs_mount_bin(const boot_handoff_t *handoff);
+
 extern const uint8_t g_user_init_binary[];
 extern const uint64_t g_user_init_binary_len;
 extern const uint8_t g_user_test_binary[];
 extern const uint64_t g_user_test_binary_len;
+
+static uint64_t boot_probe_results[SMP_MAX_CPUS];
+
+static void boot_cpu_probe(void *arg) {
+    uint32_t cpu = smp_get_cpu_id();
+    kassert(cpu == (uintptr_t)arg);
+    uint64_t result = 0x5354524100000000ULL | cpu;
+    for (unsigned i = 0; i < 128; i++) result = (result ^ i) * 1099511628211ULL;
+    __atomic_store_n(&boot_probe_results[cpu], result, __ATOMIC_RELEASE);
+}
+
+static void boot_probe_run(void) {
+    uint32_t online = smp_get_online_cpus();
+    for (uint32_t cpu = 0; cpu < online; cpu++) {
+        kassert(thread_create_on_cpu("boot-probe", boot_cpu_probe, (void *)(uintptr_t)cpu,
+                                      THREAD_PRIO_NORMAL, cpu));
+    }
+    uint64_t start = timer_get_uptime_ms();
+    for (uint32_t cpu = 0; cpu < online; cpu++) {
+        uint64_t result;
+        while (!(result = __atomic_load_n(&boot_probe_results[cpu], __ATOMIC_ACQUIRE))) {
+            kassert(timer_get_uptime_ms() - start < 5000);
+            hlt();
+        }
+        kprintf("[BOOT-PROBE] cpu=%u result=%lx\n", cpu, result);
+    }
+}
 
 static _Noreturn void start_system(void) {
     smp_init(&g_boot_handoff);
@@ -52,6 +81,8 @@ static _Noreturn void start_system(void) {
     trace_init();
     sti();
 
+    if (!strcmp(g_boot_handoff.cmdline, "boot-probe\n")) boot_probe_run();
+
     pci_init();
     virtio_blk_init();
     if (strcmp(g_boot_handoff.cmdline, "driver=blk-wrap\n") == 0) {
@@ -60,6 +91,8 @@ static _Noreturn void start_system(void) {
     }
     virtio_net_init();
     vfs_init();
+    int archive_result = initramfs_mount_bin(&g_boot_handoff);
+    if (archive_result) kprintf("[INITRAMFS] /bin mount failed (%d).\n", archive_result);
     stratafs_init();
     int mount_result = vfs_mount("virtio-blk", "/", "stratafs", 0);
     if (mount_result != 0) {
@@ -254,6 +287,8 @@ void kmain(boot_handoff_t *handoff, uint64_t magic) {
     process_init();
 
     kprintf("[TEST] Running P08 Process lifecycle, fork/waitpid, and IPC pipe verification...\n");
+    vfs_init();
+    kassert(initramfs_mount_bin(&g_boot_handoff) == 0);
     process_t *init_proc = process_create_init(&s_user_prog);
     kassert(init_proc != NULL);
     kassert(init_proc->pid == 1);
@@ -354,7 +389,6 @@ void kmain(boot_handoff_t *handoff, uint64_t magic) {
     kprintf("[TEST] Virtio hardware smoke completed.\n");
 
     /* 15. Initialize VFS, Journal, and StrataFS (P10 & P11) */
-    vfs_init();
     stratafs_init();
 
     kprintf("[TEST] Running P10 & P11 VFS, StrataFS Storage, and Journal Recovery verification...\n");
