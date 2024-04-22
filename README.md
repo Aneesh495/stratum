@@ -48,10 +48,11 @@ The service acknowledges an append after the guest filesystem flushes it. Identi
 | `make test-boot` | Nine QEMU configurations and 17 malformed loader images |
 | `make test-boot-campaign` | 45 fresh boots with per-CPU probes, entry debugger checks, and 128 malformed loader or handoff inputs |
 | `make test-exec` | Shell pipelines, disk redirection, and 10,000 real fork/exec/wait cycles on each of 4 and 8 vCPUs |
+| `make test-threads` | 25,000 create/join cycles, 10,000 syscall boundary checks, and 512 live workers across 32 processes per profile |
 | `make test-abi test-storage test-faults` | Guest ABI, COW, pipes, filesystem paths, and deliberate trap handling |
 | `make test-drivers` | 150,000 virtio-blk reads with two full ring wraps |
 | `make test-storage-crash` | 100 forced VM interruptions across ten WAL stages |
 | `make evidence` | Tests and two clean builds from the committed source |
 | `make verify` | Read-only validation of a generated regression bundle |
 
-See the [verification status](docs/BUILD_STATUS.md) and [full acceptance targets](docs/ACCEPTANCE_PLAN.md) for coverage and open work. The supported execution target is QEMU x86-64. The kernel supports one user thread per process, static ELF executables, and a bounded IPv4 stack. Physical hardware, full POSIX compatibility, and the complete acceptance workloads remain unverified.
+See the [verification status](docs/BUILD_STATUS.md) and [full acceptance targets](docs/ACCEPTANCE_PLAN.md) for coverage and open work. The supported execution target is QEMU x86-64. The kernel supports static ELF executables, CPU-local user threads with TLS, and a bounded IPv4 stack. Physical hardware, full POSIX compatibility, and the complete acceptance workloads remain unverified.

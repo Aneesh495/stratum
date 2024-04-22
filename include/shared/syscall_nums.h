@@ -13,6 +13,9 @@
 #define SYS_thread_self     13
 #define SYS_futex           14
 #define SYS_arch_prctl      15
+#define SYS_sched_yield     16
+#define SYS_getcpu          17
+#define SYS_fork_on_cpu     18
 
 #define SYS_mmap            20
 #define SYS_munmap          21
@@ -49,6 +52,7 @@
 
 #define SYS_trace_emit      70
 #define SYS_sysinfo         71
+#define SYS_sched_switches  72
 
 /* Futex operations */
 #define FUTEX_WAIT          0
@@ -110,6 +114,7 @@
 #define SHUT_WR             1
 #define SHUT_RDWR           2
 
+#ifndef __ASSEMBLER__
 typedef struct strat_dirent {
     uint64_t d_ino;
     uint8_t d_type;
@@ -124,5 +129,7 @@ typedef struct strat_sysinfo {
     uint64_t free_memory_bytes;
     uint64_t total_syscalls;
 } strat_sysinfo_t;
+
+#endif /* __ASSEMBLER__ */
 
 #endif /* STRATUM_SHARED_SYSCALL_NUMS_H */

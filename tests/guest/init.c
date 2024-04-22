@@ -178,7 +178,7 @@ int main(int argc, char **argv) {
         if (waitpid(child, &status, 0) != child || status != (cycle == 63 ? 134 : cycle)) return 12;
         if (g_cow_test_var != 111) return 13;
     }
-    if (syscall1(SYS_thread_self, 0) != -STRATUM_ENOSYS) return 14;
+    if (syscall1(SYS_futex, 0) != -STRATUM_ENOSYS) return 14;
     print("[USER] 64 fork/reap cycles, COW, invalid status pointer and Ring 3 fault isolation verified.\n");
     const size_t length = 128 * 4096;
     int64_t mapped = mmap_anonymous(length, PROT_READ | PROT_WRITE);

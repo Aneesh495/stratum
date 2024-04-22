@@ -20,6 +20,26 @@ static uint32_t   g_next_tid = SMP_MAX_CPUS + 1;
 
 runqueue_t g_runqueues[SMP_MAX_CPUS];
 
+static const _Alignas(16) uint8_t initial_fp[512] = {
+    [0] = 0x7f, [1] = 0x03, /* x87 control word */
+    [24] = 0x80, [25] = 0x1f, /* MXCSR */
+};
+
+static void save_fp(thread_t *thread) {
+    __asm__ volatile("fxsave64 %0" : "=m"(thread->fp_state));
+}
+
+static void restore_fp(thread_t *thread) {
+    __asm__ volatile("fxrstor64 %0" :: "m"(thread->fp_state));
+}
+
+void thread_reset_user_state(thread_t *thread) {
+    thread->fs_base = 0;
+    wrmsr(MSR_FS_BASE, 0);
+    memcpy(thread->fp_state, initial_fp, sizeof(initial_fp));
+    restore_fp(thread);
+}
+
 static void rq_enqueue(runqueue_t *rq, thread_t *t) {
     if (!rq || !t) return;
     t->state = THREAD_STATE_READY;
@@ -108,6 +128,8 @@ void sched_finish_switch(void) {
         spin_unlock(&rq->lock);
         if (prev->state == THREAD_STATE_ZOMBIE) {
             process_t *process = prev->process;
+            uint32_t slot = prev->worker_slot;
+            int status = prev->exit_status;
             if (prev->kernel_stack_base) {
                 pmm_free_pages(virt_to_phys((void *)prev->kernel_stack_base), 2);
                 prev->kernel_stack_base = 0;
@@ -115,14 +137,15 @@ void sched_finish_switch(void) {
             spin_lock(&g_thread_pool_lock);
             prev->state = THREAD_STATE_UNUSED;
             spin_unlock(&g_thread_pool_lock);
-            if (process) process_finish_exit(process);
+            if (process) process_finish_thread(process, slot, status);
         }
     }
 }
 
 void sched_init_cpu(uint32_t cpu_id) {
     /* Floating-point state is unavailable until it is saved per thread. */
-    write_cr0(read_cr0() | CR0_WP | CR0_TS);
+    write_cr0((read_cr0() | CR0_WP | CR0_MP | CR0_NE) & ~(CR0_TS | CR0_EM));
+    write_cr4((read_cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT) & ~(CR4_FSGSBASE | CR4_OSXSAVE));
     runqueue_t *rq = &g_runqueues[cpu_id];
     memset(rq, 0, sizeof(runqueue_t));
     spin_lock_init(&rq->lock);
@@ -160,7 +183,8 @@ void sched_init(void) {
 
 static thread_t *thread_create_internal(const char *name, void (*entry)(void *), void *arg,
                                         thread_prio_t prio, pml4_t *as, process_t *process,
-                                        int fixed_cpu) {
+                                        int fixed_cpu, uint32_t slot, uint64_t fs_base,
+                                        thread_t *inherit) {
     if (!entry) return NULL;
 
     uint64_t flags;
@@ -188,6 +212,14 @@ static thread_t *thread_create_internal(const char *name, void (*entry)(void *),
     t->pinned = fixed_cpu >= 0;
     t->address_space = as;
     t->process = process;
+    t->worker_slot = slot;
+    t->fs_base = fs_base;
+    if (inherit) {
+        save_fp(inherit);
+        memcpy(t->fp_state, inherit->fp_state, sizeof(t->fp_state));
+    } else if (process) {
+        memcpy(t->fp_state, initial_fp, sizeof(initial_fp));
+    }
 
     /* Allocate 16 KiB stack */
     uint64_t stack_phys = pmm_alloc_pages(2);
@@ -219,10 +251,12 @@ static thread_t *thread_create_internal(const char *name, void (*entry)(void *),
     uint32_t online = smp_get_online_cpus();
     if (online == 0) online = 1;
 
-    for (uint32_t c = 0; !t->pinned && c < online; c++) {
-        spin_lock(&g_runqueues[c].lock);
-        uint32_t running = g_runqueues[c].nr_running;
-        spin_unlock(&g_runqueues[c].lock);
+    for (uint32_t i = 0; !t->pinned && i < online; i++) {
+        uint32_t c = (t->tid + i) % online;
+        runqueue_t *candidate = &g_runqueues[c];
+        spin_lock(&candidate->lock);
+        uint32_t running = candidate->nr_running + (candidate->current_thread != candidate->idle_thread);
+        spin_unlock(&candidate->lock);
         if (running < min_running) {
             min_running = running;
             target_cpu = c;
@@ -230,18 +264,19 @@ static thread_t *thread_create_internal(const char *name, void (*entry)(void *),
     }
 
     t->assigned_cpu = target_cpu;
-    if (process) process->main_thread = t;
+    if (process && !slot) process->main_thread = t;
 
     runqueue_t *rq = &g_runqueues[target_cpu];
     uint64_t rq_flags;
     spin_lock_irqsave(&rq->lock, &rq_flags);
     rq_enqueue(rq, t);
+    bool target_idle = rq->current_thread == rq->idle_thread;
     spin_unlock_irqrestore(&rq->lock, rq_flags);
 
     spin_unlock_irqrestore(&g_thread_pool_lock, flags);
 
-    /* Signal target CPU if not current CPU */
-    if (target_cpu != smp_get_cpu_id()) {
+    /* An idle local CPU may be returning from a context switch with IRQs off. */
+    if (target_idle || target_cpu != smp_get_cpu_id()) {
         smp_send_ipi(g_cpus[target_cpu].lapic_id, VEC_IPI_RESCHED);
     }
 
@@ -251,16 +286,27 @@ static thread_t *thread_create_internal(const char *name, void (*entry)(void *),
 thread_t *thread_create_on_cpu(const char *name, void (*entry)(void *), void *arg,
                                thread_prio_t prio, uint32_t cpu) {
     if (cpu >= smp_get_online_cpus()) return NULL;
-    return thread_create_internal(name, entry, arg, prio, NULL, NULL, (int)cpu);
+    return thread_create_internal(name, entry, arg, prio, NULL, NULL, (int)cpu, 0, 0, NULL);
 }
 
 thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg,
-                             thread_prio_t prio, pml4_t *as, process_t *process) {
-    return thread_create_internal(name, entry, arg, prio, as, process, -1);
+                             thread_prio_t prio, pml4_t *as, process_t *process,
+                             thread_t *inherit, int fixed_cpu) {
+    return thread_create_internal(name, entry, arg, prio, as, process, fixed_cpu, 0,
+                                  inherit ? rdmsr(MSR_FS_BASE) : 0, inherit);
+}
+
+thread_t *thread_create_worker(process_t *process, uint32_t slot, uint64_t fs_base,
+                               void (*entry)(void *), void *arg) {
+    uint32_t cpu = smp_get_cpu_id();
+    /* All siblings share one CPU while the process can modify its page tables. */
+    g_runqueues[cpu].current_thread->pinned = true;
+    return thread_create_internal(process->name, entry, arg, THREAD_PRIO_NORMAL,
+                                  process->address_space, process, (int)cpu, slot, fs_base, NULL);
 }
 
 thread_t *thread_create(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio) {
-    return thread_create_user(name, entry, arg, prio, NULL, NULL);
+    return thread_create_user(name, entry, arg, prio, NULL, NULL, NULL, -1);
 }
 
 void sched_reschedule(void) {
@@ -299,6 +345,7 @@ void sched_reschedule(void) {
     }
 
     if (curr->state == THREAD_STATE_RUNNING) {
+        if (curr->process && next->process) __atomic_add_fetch(&rq->user_switches, 1, __ATOMIC_RELAXED);
         if (curr != rq->idle_thread) {
             rq_enqueue(rq, curr);
         } else {
@@ -316,6 +363,13 @@ void sched_reschedule(void) {
     gdt_set_kernel_stack(next->kernel_stack_top);
 
     spin_unlock(&rq->lock);
+
+    if (curr->process) {
+        save_fp(curr);
+        curr->fs_base = rdmsr(MSR_FS_BASE);
+    }
+    if (next->process) restore_fp(next);
+    wrmsr(MSR_FS_BASE, next->fs_base);
 
     /* Perform context switch */
     uint64_t next_cr3 = next->address_space ? virt_to_phys(next->address_space) : virt_to_phys(g_kernel_pml4);
@@ -350,10 +404,11 @@ void thread_wake(thread_t *thread) {
     rq_enqueue(rq, thread);
 
     uint32_t target_cpu = thread->assigned_cpu;
+    bool target_idle = rq->current_thread == rq->idle_thread;
     spin_unlock_irqrestore(&rq->lock, flags);
 
     /* The caller may still hold the lock protecting the wait condition. */
-    if (target_cpu != smp_get_cpu_id()) {
+    if (target_idle || target_cpu != smp_get_cpu_id()) {
         smp_send_ipi(g_cpus[target_cpu].lapic_id, VEC_IPI_RESCHED);
     }
 }

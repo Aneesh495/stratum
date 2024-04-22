@@ -121,6 +121,7 @@ static int load_path(const char *path, user_program_t *prog) {
 int process_exec(const char *path, const char *const *argv, const char *const *envp) {
     process_t *proc = process_get_current();
     if (!proc) return -STRATUM_ESRCH;
+    if (!process_can_replace_image(proc)) return -STRATUM_EBUSY;
     char kernel_path[VFS_MAX_PATH];
     int res = copy_string(kernel_path, path, sizeof(kernel_path), NULL);
     if (res) return res == -STRATUM_E2BIG ? -STRATUM_ENAMETOOLONG : res;
@@ -145,10 +146,12 @@ int process_exec(const char *path, const char *const *argv, const char *const *e
     proc->address_space = image.address_space;
     thread->address_space = image.address_space;
     memset(proc->regions, 0, sizeof(proc->regions));
+    memset(proc->workers, 0, sizeof(proc->workers));
     const char *leaf = strrchr(kernel_path, '/');
     strncpy(proc->name, leaf ? leaf + 1 : kernel_path, sizeof(proc->name) - 1);
     proc->name[sizeof(proc->name) - 1] = 0;
     vmm_switch_address_space(image.address_space);
+    thread_reset_user_state(thread);
     vmm_destroy_address_space(old);
     fd_close_exec(&proc->fds);
 

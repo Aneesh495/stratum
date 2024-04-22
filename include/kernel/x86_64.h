@@ -36,6 +36,7 @@
 #define CR4_PCE             (1ULL << 8)   /* Performance Counter Enable */
 #define CR4_OSFXSR          (1ULL << 9)   /* OS Support for FXSAVE/FXRSTOR */
 #define CR4_OSXMMEXCPT      (1ULL << 10)  /* OS Support for Unmasked SIMD Exceptions */
+#define CR4_OSXSAVE         (1ULL << 18)  /* OS Support for XSAVE/XRSTOR */
 #define CR4_FSGSBASE        (1ULL << 16)  /* Enable RDFSBASE/RDGSBASE/etc. */
 
 static inline void outb(uint16_t port, uint8_t val) {

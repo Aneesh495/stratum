@@ -47,6 +47,10 @@ typedef struct thread {
 
     pml4_t          *address_space; /* CR3 address space */
     struct process  *process;       /* Owning process */
+    uint32_t         worker_slot;   /* Zero for the original process thread */
+    int              exit_status;
+    uint64_t         fs_base;
+    _Alignas(16) uint8_t fp_state[512];
 
     struct thread   *next;          /* Queue link */
     struct thread   *global_next;   /* Global thread table link */
@@ -63,6 +67,7 @@ typedef struct {
     thread_t  *queues[THREAD_PRIO_COUNT];
     thread_t  *tails[THREAD_PRIO_COUNT];
     uint32_t   nr_running;
+    uint64_t   user_switches;
     thread_t  *current_thread;
     thread_t  *idle_thread;
     thread_t  *prev_thread;
@@ -75,7 +80,11 @@ void      sched_init_cpu(uint32_t cpu_id);
 void      sched_finish_switch(void);
 thread_t *thread_create(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio);
 thread_t *thread_create_on_cpu(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio, uint32_t cpu);
-thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio, pml4_t *as, struct process *process);
+thread_t *thread_create_user(const char *name, void (*entry)(void *), void *arg, thread_prio_t prio, pml4_t *as, struct process *process,
+                                 thread_t *inherit, int fixed_cpu);
+thread_t *thread_create_worker(struct process *process, uint32_t slot, uint64_t fs_base,
+                               void (*entry)(void *), void *arg);
+void      thread_reset_user_state(thread_t *thread);
 void      thread_exit(void);
 void      thread_yield(void);
 void      thread_sleep_ms(uint32_t ms);

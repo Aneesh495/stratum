@@ -90,7 +90,6 @@ user_enter:
     movw $0x1B, %ax
     movw %ax, %ds
     movw %ax, %es
-    movw %ax, %fs
 
     /* Build iretq stack frame */
     pushq $0x1B                 /* SS: USER_DS */
@@ -112,7 +111,6 @@ user_enter_regs:
     movw $0x1B, %ax
     movw %ax, %ds
     movw %ax, %es
-    movw %ax, %fs
 
     movq %rdi, %rsp             /* Set stack pointer to regs structure */
 

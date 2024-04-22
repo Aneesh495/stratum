@@ -428,8 +428,12 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
     }
 
     case SYS_fork: {
-        return process_fork(regs);
+        return process_fork(regs, -1);
     }
+
+    case SYS_fork_on_cpu:
+        if (regs->rdi >= smp_get_online_cpus()) return -STRATUM_EINVAL;
+        return process_fork(regs, (int)regs->rdi);
 
     case SYS_execve:
         return process_exec((const char *)regs->rdi, (const char *const *)regs->rsi,
@@ -441,6 +445,32 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
         int options = (int)regs->rdx;
         return process_waitpid(pid, status, options);
     }
+
+    case SYS_thread_create:
+        return process_thread_create(regs->rdi, regs->rsi, regs->rdx, regs->r10);
+
+    case SYS_thread_exit:
+        process_exit((int)regs->rdi);
+
+    case SYS_thread_join:
+        return process_thread_join(regs->rdi, (int *)regs->rsi);
+
+    case SYS_thread_self:
+        return process_thread_self();
+
+    case SYS_arch_prctl:
+        return process_arch_prctl(regs->rdi, regs->rsi);
+
+    case SYS_sched_yield:
+        thread_yield();
+        return 0;
+
+    case SYS_getcpu:
+        return smp_get_cpu_id();
+
+    case SYS_sched_switches:
+        if (regs->rdi >= smp_get_online_cpus()) return -STRATUM_EINVAL;
+        return (int64_t)__atomic_load_n(&g_runqueues[regs->rdi].user_switches, __ATOMIC_RELAXED);
 
     case SYS_mmap:
         if (regs->rdi || regs->r10 != (MAP_PRIVATE | MAP_ANONYMOUS) ||

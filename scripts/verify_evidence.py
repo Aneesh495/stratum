@@ -11,6 +11,7 @@ import sys
 
 from evidence_format import ARTIFACTS, COMMANDS, PROFILES, REQUIRED_TRANSCRIPTS, SCHEMA, file_hash
 from test_replication import check_capture
+from test_threads import check_population
 
 
 def check(condition, message):
@@ -78,6 +79,11 @@ def verify(root):
         check("ONE | TWO\n" in log and "FIRST LINE\nSECOND\n" in log and
               "fork/exec/wait cycles=10000 with argv, envp, CLOEXEC and resource recovery" in log,
               f"{cpus} CPUs: shell or exec lifecycle evidence mismatch")
+        threads = read(f"transcripts/threads/{cpus}cpu.log")
+        check("thread create/join cycles=25000 with FS TLS, XMM state, stale TIDs and resource recovery" in threads
+              and "syscall boundaries=10000 across ten families" in threads,
+              f"{cpus} CPUs: thread lifecycle evidence mismatch")
+        check_population(threads.encode(), cpus)
     for cpus in (1, 2, 4, 8):
         log = read(f"transcripts/diagnostics/stress-{cpus}.log")
         check("64 fork/reap cycles" in log and "128 demand-zero pages" in log and

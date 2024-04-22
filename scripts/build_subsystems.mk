@@ -115,7 +115,7 @@ USER_CFLAGS := -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -mge
 
 USER_LDFLAGS := -nostdlib -static -z max-page-size=0x1000 -T user/lib/user.ld
 
-USER_LIB_SRCS := user/lib/crt0.S user/lib/syscall.c user/lib/string.c user/lib/printf.c
+USER_LIB_SRCS := user/lib/crt0.S user/lib/thread_start.S user/lib/syscall.c user/lib/string.c user/lib/printf.c
 USER_LIB_OBJS := $(addprefix $(BUILD_DIR)/,$(addsuffix .o,$(basename $(USER_LIB_SRCS))))
 
 $(BUILD_DIR)/user/%.o: user/%.c scripts/build_subsystems.mk
@@ -133,11 +133,12 @@ $(BUILD_DIR)/user/init_test.o: tests/guest/init.c scripts/build_subsystems.mk
 $(BUILD_DIR)/user_init.elf: $(USER_LIB_OBJS) $(BUILD_DIR)/user/apps/sh.o $(BUILD_DIR)/user/apps/ledgerd.o $(BUILD_DIR)/user/apps/init.o user/lib/user.ld
 	$(LD_LLD) $(USER_LDFLAGS) -o $@ $(filter %.o,$^)
 
-$(BUILD_DIR)/user/exec_campaign.o: tests/guest/exec_campaign.c scripts/build_subsystems.mk
+.SECONDARY: $(BUILD_DIR)/user/exec_campaign.o $(BUILD_DIR)/user/thread_campaign.o
+$(BUILD_DIR)/user/%_campaign.o: tests/guest/%_campaign.c scripts/build_subsystems.mk
 	@mkdir -p $(dir $@)
 	$(CLANG) $(USER_CFLAGS) -MMD -MP -c $< -o $@
 
-$(BUILD_DIR)/user_exec_campaign.elf: $(USER_LIB_OBJS) $(BUILD_DIR)/user/exec_campaign.o user/lib/user.ld
+$(BUILD_DIR)/user_%_campaign.elf: $(USER_LIB_OBJS) $(BUILD_DIR)/user/%_campaign.o user/lib/user.ld
 	$(LD_LLD) $(USER_LDFLAGS) -o $@ $(filter %.o,$^)
 
 $(BUILD_DIR)/user_tools.elf: $(USER_LIB_OBJS) $(BUILD_DIR)/user/apps/tools.o user/lib/user.ld
@@ -169,12 +170,13 @@ $(BUILD_DIR)/stratum.elf: $(BUILD_DIR)/user_init.elf $(KERNEL_OBJS) kernel/arch/
 # Build Minimal Initramfs
 build-initramfs: $(BUILD_DIR)/initramfs.cpio
 
-$(BUILD_DIR)/initramfs.cpio: $(BUILD_DIR)/user_init.elf $(BUILD_DIR)/user_tools.elf $(BUILD_DIR)/user_exec_campaign.elf scripts/build_cpio.py
+$(BUILD_DIR)/initramfs.cpio: $(BUILD_DIR)/user_init.elf $(BUILD_DIR)/user_tools.elf $(BUILD_DIR)/user_exec_campaign.elf $(BUILD_DIR)/user_thread_campaign.elf scripts/build_cpio.py
 	@mkdir -p $(BUILD_DIR)
 	@$(PYTHON) scripts/build_cpio.py $< $@ true=$(BUILD_DIR)/user_tools.elf \
-		upper=$(BUILD_DIR)/user_tools.elf exec-campaign=$(BUILD_DIR)/user_exec_campaign.elf
+		upper=$(BUILD_DIR)/user_tools.elf exec-campaign=$(BUILD_DIR)/user_exec_campaign.elf \
+		thread-campaign=$(BUILD_DIR)/user_thread_campaign.elf
 
 
 -include $(UEFI_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d) $(USER_LIB_OBJS:.o=.d) \
          $(BUILD_DIR)/user/apps/init.d $(BUILD_DIR)/user/apps/sh.d $(BUILD_DIR)/user/apps/ledgerd.d $(BUILD_DIR)/user/init_test.d
--include $(BUILD_DIR)/user/apps/tools.d $(BUILD_DIR)/user/exec_campaign.d
+-include $(BUILD_DIR)/user/apps/tools.d $(BUILD_DIR)/user/exec_campaign.d $(BUILD_DIR)/user/thread_campaign.d

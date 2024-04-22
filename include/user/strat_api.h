@@ -111,6 +111,29 @@ static inline int execve(const char *path, const char *const *argv, const char *
     return (int)syscall3(SYS_execve, (uint64_t)path, (uint64_t)argv, (uint64_t)envp);
 }
 
+void strat_thread_start(void);
+
+static inline int64_t strat_thread_create(int (*entry)(void *), void *arg, void *tls) {
+    return syscall4(SYS_thread_create, (uintptr_t)strat_thread_start, (uintptr_t)entry,
+                    (uintptr_t)arg, (uintptr_t)tls);
+}
+
+static inline int strat_thread_join(uint32_t tid, int *status) {
+    return (int)syscall2(SYS_thread_join, tid, (uintptr_t)status);
+}
+
+static inline uint32_t strat_thread_self(void) {
+    return (uint32_t)syscall0(SYS_thread_self);
+}
+
+static inline int strat_set_fs(void *base) {
+    return (int)syscall2(SYS_arch_prctl, ARCH_SET_FS, (uintptr_t)base);
+}
+
+static inline int strat_get_fs(uintptr_t *base) {
+    return (int)syscall2(SYS_arch_prctl, ARCH_GET_FS, (uintptr_t)base);
+}
+
 void exit(int status) __attribute__((noreturn));
 
 /* File System API */
@@ -208,6 +231,10 @@ static inline int fork(void) {
     return (int)syscall0(SYS_fork);
 }
 
+static inline int strat_fork_on_cpu(unsigned cpu) {
+    return (int)syscall1(SYS_fork_on_cpu, cpu);
+}
+
 static inline int waitpid(int pid, int *status, int options) {
     return (int)syscall3(SYS_waitpid, (uint64_t)pid, (uint64_t)status, (uint64_t)options);
 }
@@ -217,7 +244,15 @@ static inline int getpid(void) {
 }
 
 static inline int yield(void) {
-    return (int)syscall0(SYS_thread_create);
+    return (int)syscall0(SYS_sched_yield);
+}
+
+static inline int strat_getcpu(void) {
+    return (int)syscall0(SYS_getcpu);
+}
+
+static inline int64_t strat_sched_switches(unsigned cpu) {
+    return syscall1(SYS_sched_switches, cpu);
 }
 
 static inline int sleep_ms(uint32_t ms) {

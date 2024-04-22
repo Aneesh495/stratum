@@ -1,10 +1,14 @@
 #include <kernel/process.h>
+#include <kernel/pmm.h>
 #include <kernel/slab.h>
 #include <kernel/kernel.h>
 #include <kernel/string.h>
 #include <kernel/smp.h>
 #include <kernel/vmm.h>
 #include <shared/errno.h>
+#include <kernel/x86_64.h>
+
+#define WORKER_STACK_PAGES 4
 
 static process_t g_process_pool[PROCESS_MAX_COUNT];
 static spinlock_t g_process_lock = SPINLOCK_INIT;
@@ -18,10 +22,22 @@ void process_init(void) {
     }
 }
 
+static thread_t *current_thread(void) {
+    return g_runqueues[smp_get_cpu_id()].current_thread;
+}
+
 process_t *process_get_current(void) {
-    uint32_t cpu_id = smp_get_cpu_id();
-    thread_t *curr = g_runqueues[cpu_id].current_thread;
+    thread_t *curr = current_thread();
     return curr ? curr->process : NULL;
+}
+
+bool process_can_replace_image(const process_t *proc) {
+    return proc && proc->main_thread == current_thread() && proc->live_threads == 1;
+}
+
+uint32_t process_thread_self(void) {
+    thread_t *curr = current_thread();
+    return curr && curr->process ? curr->tid : 0;
 }
 
 uint32_t process_active_count(void) {
@@ -67,8 +83,10 @@ process_t *process_create_init(user_program_t *prog) {
     proc->state = PROC_STATE_ALIVE;
     strncpy(proc->name, "init", sizeof(proc->name) - 1);
     proc->address_space = prog->address_space;
+    proc->live_threads = 1;
     spin_lock_init(&proc->lock);
     wait_queue_init(&proc->wait_child);
+    wait_queue_init(&proc->wait_threads);
 
     fd_table_init(&proc->fds);
     file_t *c0 = file_create_console();
@@ -89,7 +107,7 @@ process_t *process_create_init(user_program_t *prog) {
     spin_unlock_irqrestore(&g_process_lock, flags);
 
     thread_t *t = thread_create_user("init", user_process_starter, prog,
-                                      THREAD_PRIO_NORMAL, prog->address_space, proc);
+                                      THREAD_PRIO_NORMAL, prog->address_space, proc, NULL, -1);
     if (!t) {
         fd_table_destroy(&proc->fds);
         proc->state = PROC_STATE_UNUSED;
@@ -105,11 +123,12 @@ static void fork_child_entry(void *arg) {
     user_enter_regs(&regs);
 }
 
-int32_t process_fork(syscall_regs_t *regs) {
+int32_t process_fork(syscall_regs_t *regs, int fixed_cpu) {
     if (!regs) return -STRATUM_EINVAL;
 
     process_t *parent = process_get_current();
     if (!parent) return -STRATUM_ESRCH;
+    if (!process_can_replace_image(parent)) return -STRATUM_EBUSY;
 
     uint64_t flags;
     spin_lock_irqsave(&g_process_lock, &flags);
@@ -132,9 +151,11 @@ int32_t process_fork(syscall_regs_t *regs) {
     child->ppid = parent->pid;
     child->state = PROC_STATE_ALIVE;
     child->parent = parent;
+    child->live_threads = 1;
     snprintf(child->name, sizeof(child->name), "proc_%u", child->pid);
     spin_lock_init(&child->lock);
     wait_queue_init(&child->wait_child);
+    wait_queue_init(&child->wait_threads);
 
     /* Clone virtual address space with Copy-On-Write */
     child->address_space = vmm_clone_address_space(parent->address_space);
@@ -154,7 +175,7 @@ int32_t process_fork(syscall_regs_t *regs) {
         *child_regs = *regs;
         child_regs->rax = 0;
         if (thread_create_user(child->name, fork_child_entry, child_regs,
-                               THREAD_PRIO_NORMAL, child->address_space, child)) {
+                               THREAD_PRIO_NORMAL, child->address_space, child, current_thread(), fixed_cpu)) {
             child->next_sibling = parent->children;
             parent->children = child;
             int32_t pid = (int32_t)child->pid;
@@ -170,40 +191,164 @@ int32_t process_fork(syscall_regs_t *regs) {
     return -STRATUM_ENOMEM;
 }
 
-void process_exit(int status) {
-    process_t *proc = process_get_current();
-    if (proc) {
-        proc->exit_code = status;
-        fd_table_destroy(&proc->fds);
+static uint64_t worker_stack_top(unsigned slot) {
+    /* Keep an unmapped page between neighboring stacks and below the main stack. */
+    return USER_STACK_TOP - (USER_STACK_PAGES + 1 + (slot - 1) * (WORKER_STACK_PAGES + 1)) * PAGE_SIZE;
+}
+
+static void release_worker_stack(process_t *proc, unsigned slot) {
+    uint64_t top = worker_stack_top(slot);
+    for (uint64_t va = top - WORKER_STACK_PAGES * PAGE_SIZE; va < top; va += PAGE_SIZE) {
+        uint64_t phys;
+        if (vmm_get_mapping(proc->address_space, va, &phys, NULL) != 0) continue;
+        kassert(vmm_unmap_page(proc->address_space, va) == 0);
+        pmm_page_release(phys);
     }
+}
+
+static bool executable_at(process_t *proc, uint64_t address) {
+    uint64_t flags;
+    return address < USER_SPACE_TOP && !vmm_get_mapping(proc->address_space, address, NULL, &flags)
+        && (flags & PTE_USER) && !(flags & PTE_NX);
+}
+
+int64_t process_thread_create(uint64_t trampoline, uint64_t entry, uint64_t arg, uint64_t fs_base) {
+    process_t *proc = process_get_current();
+    if (!proc) return -STRATUM_ESRCH;
+    if (fs_base >= USER_SPACE_TOP) return -STRATUM_EINVAL;
+    if (!executable_at(proc, trampoline) || !executable_at(proc, entry)) return -STRATUM_EFAULT;
+
+    unsigned slot = 0;
+    while (slot < PROCESS_WORKERS && proc->workers[slot].tid) slot++;
+    if (slot == PROCESS_WORKERS) return -STRATUM_EAGAIN;
+
+    syscall_regs_t *regs = kzalloc(sizeof(*regs));
+    if (!regs) return -STRATUM_ENOMEM;
+
+    uint64_t top = worker_stack_top(slot + 1);
+    for (uint64_t va = top - WORKER_STACK_PAGES * PAGE_SIZE; va < top; va += PAGE_SIZE) {
+        uint64_t phys = pmm_alloc_page();
+        if (!phys) goto failed;
+        memset(phys_to_virt(phys), 0, PAGE_SIZE);
+        if (vmm_map_page(proc->address_space, va, phys, PTE_USER | PTE_WRITABLE | PTE_NX)) {
+            pmm_free_page(phys);
+            goto failed;
+        }
+    }
+    *regs = (syscall_regs_t){
+        .rip = trampoline, .rdi = entry, .rsi = arg, .rsp = top,
+        .cs = 0x23, .ss = 0x1B, .rflags = 0x202,
+    };
+    /* The worker is pinned to this CPU and cannot run before syscall return. */
+    thread_t *thread = thread_create_worker(proc, slot + 1, fs_base, fork_child_entry, regs);
+    if (!thread) goto failed;
+    proc->workers[slot].tid = thread->tid;
+    proc->live_threads++;
+    return thread->tid;
+
+failed:
+    release_worker_stack(proc, slot + 1);
+    kfree(regs);
+    return -STRATUM_ENOMEM;
+}
+
+int process_thread_join(uint64_t tid, int *status) {
+    process_t *proc = process_get_current();
+    if (!proc) return -STRATUM_ESRCH;
+    if (tid == process_thread_self()) return -STRATUM_EDEADLK;
+    if (!tid || tid > UINT32_MAX) return -STRATUM_ESRCH;
+
+    for (;;) {
+        uint64_t flags;
+        spin_lock_irqsave(&proc->lock, &flags);
+        user_thread_slot_t *target = NULL;
+        for (unsigned i = 0; i < PROCESS_WORKERS; i++) {
+            if (proc->workers[i].tid == tid) {
+                target = &proc->workers[i];
+                break;
+            }
+        }
+        if (!target) {
+            spin_unlock_irqrestore(&proc->lock, flags);
+            return -STRATUM_ESRCH;
+        }
+        if (!target->finished) {
+            wait_queue_wait_locked(&proc->wait_threads, &proc->lock, flags);
+            continue;
+        }
+        if (status && copy_to_user(status, &target->status, sizeof(*status))) {
+            spin_unlock_irqrestore(&proc->lock, flags);
+            return -STRATUM_EFAULT;
+        }
+        *target = (user_thread_slot_t){0};
+        spin_unlock_irqrestore(&proc->lock, flags);
+        return 0;
+    }
+}
+
+int process_arch_prctl(uint64_t op, uint64_t value) {
+    thread_t *thread = current_thread();
+    if (!thread || !thread->process) return -STRATUM_ESRCH;
+    if (op == ARCH_SET_FS) {
+        if (value >= USER_SPACE_TOP) return -STRATUM_EINVAL;
+        thread->fs_base = value;
+        wrmsr(MSR_FS_BASE, value);
+        return 0;
+    }
+    if (op == ARCH_GET_FS) {
+        uint64_t base = rdmsr(MSR_FS_BASE);
+        return copy_to_user((void *)value, &base, sizeof(base));
+    }
+    return -STRATUM_EINVAL;
+}
+
+void process_exit(int status) {
+    thread_t *thread = current_thread();
+    thread->exit_status = status;
+    if (thread->process && thread->process->live_threads == 1) fd_table_destroy(&thread->process->fds);
     thread_exit();
     __builtin_unreachable();
 }
 
-void process_finish_exit(process_t *proc) {
-    /* The outgoing thread's stack and page tables are no longer active. */
+static void process_finish_exit(process_t *proc) {
     uint64_t flags;
     spin_lock_irqsave(&g_process_lock, &flags);
     vmm_destroy_address_space(proc->address_space);
     proc->address_space = NULL;
-    proc->main_thread = NULL;
 
     process_t *init = &g_process_pool[0];
-    while (proc != init && proc->children) {
+    while (proc->children) {
         process_t *child = proc->children;
         proc->children = child->next_sibling;
         child->parent = init;
         child->ppid = init->pid;
-        child->next_sibling = init->children;
-        init->children = child;
+        child->next_sibling = NULL;
+        child->orphaned = true;
+        if (child->state == PROC_STATE_ZOMBIE) child->state = PROC_STATE_UNUSED;
     }
-    proc->state = PROC_STATE_ZOMBIE;
-    if (proc->parent) wait_queue_wake_all(&proc->parent->wait_child);
+    proc->state = proc->orphaned ? PROC_STATE_UNUSED : PROC_STATE_ZOMBIE;
+    if (proc->parent && !proc->orphaned) wait_queue_wake_all(&proc->parent->wait_child);
     if (proc == init) {
         g_user_exit_code = proc->exit_code;
         __atomic_store_n(&g_user_init_finished, true, __ATOMIC_RELEASE);
     }
     spin_unlock_irqrestore(&g_process_lock, flags);
+}
+
+void process_finish_thread(process_t *proc, unsigned slot, int status) {
+    /* The outgoing thread no longer uses either stack. Shared address spaces
+       are pinned to this CPU, so no remote TLB can retain the worker mapping. */
+    if (slot) {
+        release_worker_stack(proc, slot);
+        proc->workers[slot - 1].status = status;
+        proc->workers[slot - 1].finished = true;
+        wait_queue_wake_all(&proc->wait_threads);
+    } else {
+        proc->main_thread = NULL;
+        proc->exit_code = status;
+    }
+
+    if (--proc->live_threads == 0) process_finish_exit(proc);
 }
 
 int32_t process_waitpid(int32_t pid, int *status, int options) {
