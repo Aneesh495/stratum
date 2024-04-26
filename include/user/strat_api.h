@@ -126,6 +126,14 @@ static inline uint32_t strat_thread_self(void) {
     return (uint32_t)syscall0(SYS_thread_self);
 }
 
+static inline int strat_futex_wait(uint32_t *word, uint32_t expected, uint32_t timeout_ms) {
+    return (int)syscall4(SYS_futex, (uintptr_t)word, FUTEX_WAIT, expected, timeout_ms);
+}
+
+static inline int strat_futex_wake(uint32_t *word, uint32_t count) {
+    return (int)syscall4(SYS_futex, (uintptr_t)word, FUTEX_WAKE, count, 0);
+}
+
 static inline int strat_set_fs(void *base) {
     return (int)syscall2(SYS_arch_prctl, ARCH_SET_FS, (uintptr_t)base);
 }

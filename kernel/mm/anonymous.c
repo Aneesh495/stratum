@@ -1,4 +1,5 @@
 #include <kernel/process.h>
+#include <kernel/futex.h>
 #include <kernel/pmm.h>
 #include <kernel/vmm.h>
 #include <shared/errno.h>
@@ -66,6 +67,7 @@ static user_region_t *whole_region(process_t *process, uint64_t start, uint64_t 
 int user_unmap(process_t *process, uint64_t start, uint64_t length) {
     user_region_t *region = whole_region(process, start, length);
     if (!region) return -STRATUM_EINVAL;
+    futex_unmap(process, start, start + region->length);
     for (uint64_t va = start; va < start + region->length; va += PAGE_SIZE) {
         uint64_t phys;
         if (vmm_get_mapping(process->address_space, va, &phys, NULL) != 0) continue;

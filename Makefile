@@ -72,7 +72,7 @@ test-storage: image
 test-storage-crash: image
 	@$(PYTHON) scripts/test_wal_crash.py --repeats 10
 
-.PHONY: test-boot-campaign test-exec test-threads
+.PHONY: test-boot-campaign test-exec test-threads test-tlb
 test-boot-campaign: image
 	@$(PYTHON) scripts/test_boot_campaign.py
 
@@ -81,6 +81,9 @@ test-exec: image
 
 test-threads: image
 	@$(PYTHON) scripts/test_threads.py
+
+test-tlb: image
+	@$(PYTHON) scripts/test_tlb.py
 
 test-net demo: image
 	@$(PYTHON) scripts/test_ledger.py

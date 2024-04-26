@@ -55,3 +55,11 @@ selects a CPU for a child, `strat_getcpu` reports the executing CPU, and
 `strat_sched_switches` reports switches between distinct runnable user
 tasks per CPU. Cross-CPU siblings, process-wide cancellation, and
 file-backed mapping are pending.
+
+A futex key is a process and a four-byte-aligned user address. A wait
+checks the expected word and enrolls as one operation relative to sibling
+threads. It returns `EAGAIN` on mismatch, `ETIMEDOUT` on deadline expiry,
+and `EFAULT` if the mapping disappears. Timeouts are bounded to 60 seconds
+and rounded up to the 10 ms guest timer. A wake returns the number of
+matching waiters released, up to the caller's limit. User code owns the
+word and uses atomic loads and stores to publish its condition.

@@ -7,6 +7,7 @@
 #include <kernel/process.h>
 #include <kernel/file.h>
 #include <kernel/pipe.h>
+#include <kernel/futex.h>
 #include <kernel/vfs.h>
 #include <kernel/socket.h>
 #include <kernel/trace.h>
@@ -457,6 +458,9 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
 
     case SYS_thread_self:
         return process_thread_self();
+
+    case SYS_futex:
+        return futex_call(regs->rdi, regs->rsi, regs->rdx, regs->r10);
 
     case SYS_arch_prctl:
         return process_arch_prctl(regs->rdi, regs->rsi);

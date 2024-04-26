@@ -1,4 +1,5 @@
 #include <kernel/sched.h>
+#include <kernel/futex.h>
 #include <kernel/spinlock.h>
 
 static volatile uint64_t g_timer_ticks = 0;
@@ -50,6 +51,7 @@ void timer_check_sleepers(void) {
 }
 
 void timer_tick_handler(void) {
-    __atomic_add_fetch(&g_timer_ticks, 1, __ATOMIC_SEQ_CST);
+    uint64_t now = __atomic_add_fetch(&g_timer_ticks, 1, __ATOMIC_SEQ_CST);
+    futex_expire(now);
     timer_check_sleepers();
 }

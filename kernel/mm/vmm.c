@@ -323,8 +323,13 @@ void vmm_init(const boot_handoff_t *handoff) {
     g_kernel_pml4 = (pml4_t *)phys_to_virt(pml4_phys);
     memset(g_kernel_pml4, 0, PAGE_SIZE);
 
+    uint64_t kphys = handoff->kernel_phys_base;
+    uint64_t kvirt_base = STRATUM_KERNEL_BASE;
+    uint64_t protected_start = kphys + (uint64_t)_text_start - kvirt_base;
+    uint64_t protected_end = kphys + round_up((uint64_t)_rodata_end - kvirt_base, PAGE_SIZE);
+
     /* 2. Map Direct Physical Map (HHDM: 0xFFFF800000000000 to first 4 GiB) */
-    /* Map 4 GiB using 2 MiB large pages for maximum TLB performance */
+    /* Use 2 MiB pages except where kernel text and rodata need read-only aliases. */
     uint64_t hhdm_pdpt_phys = pmm_alloc_page();
     kassert(hhdm_pdpt_phys != 0);
     page_table_t *hhdm_pdpt = (page_table_t *)phys_to_virt(hhdm_pdpt_phys);
@@ -351,14 +356,25 @@ void vmm_init(const boot_handoff_t *handoff) {
             /* Only the low identity mapping contains executable AP startup code. */
             if (paddr != 0) flags |= PTE_NX;
             if (fb_start && paddr < fb_end && fb_start < paddr + huge_size) flags |= PTE_PCD | PTE_PWT;
-            pd->entries[m] = paddr | flags;
+            if (paddr >= protected_end || protected_start >= paddr + huge_size) {
+                pd->entries[m] = paddr | flags;
+                continue;
+            }
+
+            uint64_t pt_phys = pmm_alloc_page();
+            kassert(pt_phys != 0);
+            page_table_t *pt = phys_to_virt(pt_phys);
+            for (unsigned i = 0; i < 512; i++) {
+                uint64_t pa = paddr + i * PAGE_SIZE;
+                uint64_t leaf = flags & ~PTE_HUGE;
+                if (pa >= protected_start && pa < protected_end) leaf = (leaf | PTE_NX) & ~PTE_WRITABLE;
+                pt->entries[i] = pa | leaf;
+            }
+            pd->entries[m] = pt_phys | PTE_PRESENT | PTE_WRITABLE;
         }
     }
 
     /* 3. Map Kernel Image Segments at 0xFFFFFFFF80000000 */
-    uint64_t kphys = handoff->kernel_phys_base;
-    uint64_t kvirt_base = 0xFFFFFFFF80000000ULL;
-
     /* Map text: RX */
     uint64_t text_start_va = (uint64_t)_text_start;
     uint64_t text_end_va = (uint64_t)_text_end;
@@ -381,6 +397,12 @@ void vmm_init(const boot_handoff_t *handoff) {
     for (uint64_t va = data_start_va; va < bss_end_va; va += PAGE_SIZE) {
         uint64_t pa = kphys + (va - kvirt_base);
         kassert(vmm_map_page(g_kernel_pml4, va, pa, PTE_PRESENT | PTE_WRITABLE | PTE_NX) == 0);
+    }
+
+    for (uint64_t pa = protected_start; pa < protected_end; pa += PAGE_SIZE) {
+        uint64_t mapped, alias_flags;
+        kassert(vmm_get_mapping(g_kernel_pml4, HHDM_BASE + pa, &mapped, &alias_flags) == 0);
+        kassert(mapped == pa && (alias_flags & (PTE_WRITABLE | PTE_NX)) == PTE_NX);
     }
 
     /* Switch to the permanent kernel page tables. */

@@ -39,7 +39,10 @@ def check(cpus):
         guest.send(b"/bin/thread-campaign population\r")
         result = guest.expect(PROMPT, timeout=180)
         switches = check_population(result, cpus)
-    print(f"[PASS] {cpus} CPUs: 512 simultaneous workers in 32 processes and {switches} real user switches", flush=True)
+        guest.send(b"/bin/thread-campaign futex\r")
+        require(b"[PASS] futex cases=10000 mismatch=2500 wake=2500 timeout=2500 unmap=2500",
+                guest.expect(PROMPT, timeout=180))
+    print(f"[PASS] {cpus} CPUs: 512 simultaneous workers, {switches} real user switches, 10000 futex cases", flush=True)
 
 
 if __name__ == "__main__":

@@ -5,8 +5,8 @@ The current verification baseline covers the normal QEMU image and an opt-in dia
 | Gate | Exercised in regression | Still required |
 | --- | --- | --- |
 | A01 | 45 fresh boots with per-CPU work, 17 malformed EFI images, 111 debugger-injected handoff mutations, and entry register inspection | Hosted campaign on the release candidate |
-| A02 | 2 million host model operations, concurrent guest allocator checks, 51,200 reconciled demand-zero allocations across four diagnostic profiles, and fork/COW protection | Cross-CPU mapping replacement and the remaining memory oracles |
-| A03 | 512 simultaneous user workers across 32 processes and over 1 million runnable user switches on each of 4 and 8 CPUs | 10,000 blocking, wakeup, and timeout races, and broader fairness and cancellation checks |
+| A02 | 2 million host model operations, 51,200 reconciled guest demand-zero allocations, fork/COW protection, and 10,000 shared kernel mapping replacements on each of 4 and 8 CPUs | Shared user mappings, broader failure injection and ownership checks |
+| A03 | 512 simultaneous user workers across 32 processes, over 1 million runnable user switches, and 10,000 futex cases on each of 4 and 8 CPUs | Broader fairness and process-wide cancellation checks |
 | A04 | Ring 3 entry, 10,000 fork/exec/wait cycles, 25,000 thread joins with TLS and SSE state, and 10,000 boundary calls on each of 4 and 8 CPUs | Process-wide cancellation and broader boundary and reaping checks |
 | A05 | Pipe transfer, readiness, EOF, and descriptor duplication | Message channels and full partial-I/O and readiness-race workloads |
 | A06 | 150,000 real virtio-blk reads and two full block-queue wraps, plus virtio-net frames on the wire | Network queue wraps, cold-device workloads, saturation, and reset recovery |
@@ -14,7 +14,7 @@ The current verification baseline covers the normal QEMU image and an opt-in dia
 | A08 | Guest TCP data transfer, real ARP, exact Ethernet capture payloads including a retransmitted reply, and a separate host-client path | Bulk and broader impairment sessions, malformed traffic campaign, and UDP interoperability |
 | A09 | Native TCP service, durable acknowledgment, duplicate/conflict handling, and a record transferred to a second guest and read after reboot | Concurrent clients, automatic replication, workload counts, and repeated interruption |
 | A10 | Five bounded guest stress cycles, including 8 vCPUs and 1 GiB | 60 minutes of mixed active workloads and full resource reconciliation |
-| A11 | 2.1 million standalone parser-model mutations under sanitizers | Production-target fuzzing duration and independent wait/TLB exploration |
+| A11 | 2.1 million standalone parser-model mutations under sanitizers and independent wait/TLB exploration with negative controls | Production-target fuzzing duration, corpus and sanitizer evidence |
 | A12 | Source-bound regression bundle, 14 verifier mutation controls, and two isolated artifact builds | Complete fixed-gate evidence, full verifier corpus, and release publication |
 
 The original smoke reports and synthetic benchmark table were removed from the current tree. Git history preserves them. The [host benchmark harness](../bench/results.md) records raw host measurements separately from guest results.

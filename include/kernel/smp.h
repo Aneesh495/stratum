@@ -37,8 +37,9 @@ typedef struct __attribute__((aligned(64))) cpu {
     void             *current_thread;
     void             *idle_thread;
 
-    volatile uint64_t tlb_shootdown_addr;
-    volatile uint32_t tlb_shootdown_ack;
+    uint64_t tlb_shootdown_addr;
+    uint64_t tlb_shootdown_request;
+    uint64_t tlb_shootdown_ack;
 } cpu_t;
 
 extern cpu_t g_cpus[SMP_MAX_CPUS];

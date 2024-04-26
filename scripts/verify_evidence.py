@@ -65,6 +65,9 @@ def verify(root):
     check("2000000 / 2000000 ops completed" in host and
           "All deterministic models completed successfully" in host and
           host.count("Completed: 350000 iterations") == 6, "host operation counts missing")
+    model = read("logs/wait-tlb-model.log")
+    check("wait rejected negative control" in model and "TLB rejected negative control" in model,
+          "wait or TLB model negative control missing")
     check(read("logs/boot.log").count("[PASS] rejected ") == 17, "loader rejection count mismatch")
     for cpus, memory in PROFILES:
         name = f"{cpus}cpu-{memory}"
@@ -81,9 +84,12 @@ def verify(root):
               f"{cpus} CPUs: shell or exec lifecycle evidence mismatch")
         threads = read(f"transcripts/threads/{cpus}cpu.log")
         check("thread create/join cycles=25000 with FS TLS, XMM state, stale TIDs and resource recovery" in threads
-              and "syscall boundaries=10000 across ten families" in threads,
+              and "syscall boundaries=10000 across ten families" in threads
+              and "futex cases=10000 mismatch=2500 wake=2500 timeout=2500 unmap=2500" in threads,
               f"{cpus} CPUs: thread lifecycle evidence mismatch")
         check_population(threads.encode(), cpus)
+        check(f"cycles=10000 CPUs={cpus} retired frames verified, final unmap acknowledged" in
+              read(f"transcripts/tlb/{cpus}cpu.log"), f"{cpus} CPUs: missing cross-CPU invalidation")
     for cpus in (1, 2, 4, 8):
         log = read(f"transcripts/diagnostics/stress-{cpus}.log")
         check("64 fork/reap cycles" in log and "128 demand-zero pages" in log and

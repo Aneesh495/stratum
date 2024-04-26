@@ -1,5 +1,6 @@
 #include <kernel/process.h>
 #include <kernel/pmm.h>
+#include <kernel/futex.h>
 #include <kernel/slab.h>
 #include <kernel/kernel.h>
 #include <kernel/string.h>
@@ -198,7 +199,9 @@ static uint64_t worker_stack_top(unsigned slot) {
 
 static void release_worker_stack(process_t *proc, unsigned slot) {
     uint64_t top = worker_stack_top(slot);
-    for (uint64_t va = top - WORKER_STACK_PAGES * PAGE_SIZE; va < top; va += PAGE_SIZE) {
+    uint64_t start = top - WORKER_STACK_PAGES * PAGE_SIZE;
+    futex_unmap(proc, start, top);
+    for (uint64_t va = start; va < top; va += PAGE_SIZE) {
         uint64_t phys;
         if (vmm_get_mapping(proc->address_space, va, &phys, NULL) != 0) continue;
         kassert(vmm_unmap_page(proc->address_space, va) == 0);

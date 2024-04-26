@@ -257,12 +257,74 @@ static int boundaries(void) {
     return 0;
 }
 
+typedef struct {
+    uint32_t *word;
+    uint32_t ready;
+    int expected;
+    uint32_t timeout_ms;
+} race_case_t;
+
+static int race_worker(void *opaque) {
+    race_case_t *test = opaque;
+    __atomic_store_n(&test->ready, 1, __ATOMIC_RELEASE);
+    return strat_futex_wait(test->word, 0, test->timeout_ms) == test->expected ? 73 : 1;
+}
+
+static int futex_races(void) {
+    enum { PAGE = 4096, GROUP = 4, WAVES = 625 };
+    int64_t arena = 0;
+    for (unsigned round = 0; round < WAVES; round++) {
+        int64_t address = mmap_anonymous(PAGE, PROT_READ | PROT_WRITE);
+        if (address < 0 || (round && arena != address)) return 1;
+        arena = address;
+        uint32_t *mapped = (uint32_t *)(uintptr_t)arena;
+        uint32_t words[3 * GROUP];
+        race_case_t tests[4 * GROUP];
+        uint32_t tids[4 * GROUP];
+
+        for (unsigned i = 0; i < 4 * GROUP; i++) {
+            if (i < 3 * GROUP) words[i] = i < GROUP;
+            else mapped[i - 3 * GROUP] = 0;
+            static const int expected[] = { -STRATUM_EAGAIN, 0, -STRATUM_ETIMEDOUT, -STRATUM_EFAULT };
+            tests[i] = (race_case_t){
+                .word = i < 3 * GROUP ? &words[i] : &mapped[i - 3 * GROUP],
+                .expected = expected[i / GROUP],
+                .timeout_ms = i / GROUP == 2 ? 1 : 5000,
+            };
+            int64_t tid = strat_thread_create(race_worker, &tests[i], NULL);
+            if (tid < 0) return 2;
+            tids[i] = (uint32_t)tid;
+        }
+        for (unsigned i = 0; i < 4 * GROUP; i++) {
+            while (!__atomic_load_n(&tests[i].ready, __ATOMIC_ACQUIRE)) yield();
+        }
+        yield();
+        for (unsigned i = GROUP; i < 2 * GROUP; i++) {
+            __atomic_store_n(&words[i], 1, __ATOMIC_RELEASE);
+            if (strat_futex_wake(&words[i], 1) != 1) return 3;
+        }
+        if (munmap(mapped, PAGE)) return 4;
+        for (unsigned i = 0; i < 4 * GROUP; i++) {
+            int status = -1;
+            if (strat_thread_join(tids[i], &status) || status != 73) {
+                u_printf("thread-campaign: futex wave=%u case=%u status=%d\n", round, i, status);
+                return 5;
+            }
+        }
+        if (strat_futex_wake(mapped, 4) != 0) return 6;
+    }
+    u_printf("[PASS] futex cases=%u mismatch=%u wake=%u timeout=%u unmap=%u\n",
+             4 * GROUP * WAVES, GROUP * WAVES, GROUP * WAVES, GROUP * WAVES, GROUP * WAVES);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) return 1;
     int result;
     if (!strcmp(argv[1], "lifecycle")) result = lifecycle();
     else if (!strcmp(argv[1], "population")) result = population();
     else if (!strcmp(argv[1], "boundaries")) result = boundaries();
+    else if (!strcmp(argv[1], "futex")) result = futex_races();
     else return 1;
     if (result) u_printf("thread-campaign: failure=%d\n", result);
     return result;

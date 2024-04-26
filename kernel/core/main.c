@@ -82,6 +82,10 @@ static _Noreturn void start_system(void) {
     sti();
 
     if (!strcmp(g_boot_handoff.cmdline, "boot-probe\n")) boot_probe_run();
+    if (!strcmp(g_boot_handoff.cmdline, "memory=tlb\n")) {
+        extern void tlb_campaign(void);
+        tlb_campaign();
+    }
 
     pci_init();
     virtio_blk_init();

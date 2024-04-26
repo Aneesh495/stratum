@@ -20,6 +20,7 @@ volatile uint32_t g_smp_online_cpus = 0;
 static spinlock_t g_smp_boot_lock = SPINLOCK_INIT;
 static spinlock_t shootdown_lock = SPINLOCK_INIT;
 static bool shootdown_failed;
+static uint64_t shootdown_sequence;
 
 cpu_t *smp_get_current_cpu(void) {
     uint64_t gs = rdmsr(MSR_GS_BASE);
@@ -40,13 +41,12 @@ uint32_t smp_get_online_cpus(void) {
 static void smp_handle_tlb_shootdown(interrupt_frame_t *frame) {
     (void)frame;
     cpu_t *me = smp_get_current_cpu();
-    uint64_t va = __atomic_load_n(&me->tlb_shootdown_addr, __ATOMIC_ACQUIRE);
-    if (va == 0) {
-        write_cr3(read_cr3());
-    } else {
-        invlpg(va);
-    }
-    __atomic_store_n(&me->tlb_shootdown_ack, 1, __ATOMIC_RELEASE);
+    uint64_t request = __atomic_load_n(&me->tlb_shootdown_request, __ATOMIC_ACQUIRE);
+    if (request == __atomic_load_n(&me->tlb_shootdown_ack, __ATOMIC_RELAXED)) return;
+    uint64_t va = __atomic_load_n(&me->tlb_shootdown_addr, __ATOMIC_RELAXED);
+    if (va) invlpg(va);
+    else write_cr3(read_cr3());
+    __atomic_store_n(&me->tlb_shootdown_ack, request, __ATOMIC_RELEASE);
 }
 
 static void smp_handle_halt(interrupt_frame_t *frame) {
@@ -87,25 +87,28 @@ int smp_tlb_shootdown(uint64_t vaddr) {
         return -STRATUM_EBUSY;
     }
     int result = 0;
-    if (shootdown_failed) {
+    if (shootdown_failed || shootdown_sequence == (uint64_t)-1) {
         result = -STRATUM_EIO;
         goto out;
     }
     if (vaddr) invlpg(vaddr);
     else write_cr3(read_cr3());
 
+    /* Publish one generation to the fixed online CPU set. The caller keeps
+       the retired mapping's backing alive until this generation is complete. */
+    uint64_t request = ++shootdown_sequence;
     uint32_t current = smp_get_cpu_id();
     uint32_t online = smp_get_online_cpus();
     for (uint32_t cpu = 0; cpu < online; cpu++) {
         if (cpu == current) continue;
-        __atomic_store_n(&g_cpus[cpu].tlb_shootdown_ack, 0, __ATOMIC_RELAXED);
-        __atomic_store_n(&g_cpus[cpu].tlb_shootdown_addr, vaddr, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_cpus[cpu].tlb_shootdown_addr, vaddr, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_cpus[cpu].tlb_shootdown_request, request, __ATOMIC_RELEASE);
         smp_send_ipi(g_cpus[cpu].lapic_id, VEC_IPI_TLB);
     }
     for (uint32_t cpu = 0; cpu < online; cpu++) {
         if (cpu == current) continue;
-        unsigned spins = 1000000;
-        while (!__atomic_load_n(&g_cpus[cpu].tlb_shootdown_ack, __ATOMIC_ACQUIRE)) {
+        unsigned spins = 25000000;
+        while (__atomic_load_n(&g_cpus[cpu].tlb_shootdown_ack, __ATOMIC_ACQUIRE) != request) {
             if (spins-- == 0) {
                 shootdown_failed = true;
                 result = -STRATUM_ETIMEDOUT;
