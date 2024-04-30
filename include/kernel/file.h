@@ -26,7 +26,8 @@ typedef enum {
     FILE_TYPE_CONSOLE,
     FILE_TYPE_PIPE,
     FILE_TYPE_VFS,
-    FILE_TYPE_SOCKET
+    FILE_TYPE_SOCKET,
+    FILE_TYPE_CHANNEL
 } file_type_t;
 
 struct file;
@@ -52,6 +53,7 @@ typedef struct fd_table {
     spinlock_t lock;
     file_t    *files[PROCESS_MAX_FDS];
     uint32_t   flags[PROCESS_MAX_FDS];
+    uint64_t   generation[PROCESS_MAX_FDS];
 } fd_table_t;
 
 void    file_init(void);
@@ -69,6 +71,8 @@ int  fd_alloc_flags(fd_table_t *table, file_t *file, uint32_t flags);
 void fd_close_exec(fd_table_t *table);
 int  fd_install(fd_table_t *table, int fd, file_t *file);
 file_t *fd_get(fd_table_t *table, int fd);
+uint64_t fd_generation(fd_table_t *table, int fd);
+file_t *fd_get_generation(fd_table_t *table, int fd, uint64_t generation);
 int  fd_close(fd_table_t *table, int fd);
 int  fd_dup2(fd_table_t *table, int oldfd, int newfd);
 

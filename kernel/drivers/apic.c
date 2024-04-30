@@ -182,8 +182,8 @@ void ioapic_init(void) {
     }
 }
 
-void ioapic_route_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id) {
-    if (!g_ioapic_regs) return;
+bool ioapic_route_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id) {
+    if (!g_ioapic_regs || dest_apic_id > 255) return false;
 
     /* Check for Interrupt Source Override (ISO) */
     uint32_t gsi = irq;
@@ -203,11 +203,16 @@ void ioapic_route_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id) {
         }
     }
 
+    uint32_t first_gsi = g_acpi_info.ioapic_gsi_base[0];
+    if (gsi < first_gsi) return false;
+    uint32_t pin = gsi - first_gsi;
+    if (pin > ((ioapic_read(0x01) >> 16) & 0xff)) return false;
     uint32_t low = vector | flags;
     uint32_t high = (dest_apic_id << 24);
 
-    ioapic_write(0x10 + 2 * gsi, low);
-    ioapic_write(0x11 + 2 * gsi, high);
+    ioapic_write(0x11 + 2 * pin, high);
+    ioapic_write(0x10 + 2 * pin, low);
+    return true;
 }
 
 void ioapic_mask_irq(uint8_t irq) {

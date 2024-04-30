@@ -30,6 +30,8 @@
 #define SYS_dup2            35
 #define SYS_pipe            36
 #define SYS_poll            37
+#define SYS_pipe2           38
+#define SYS_channel_pair    39
 
 #define SYS_stat            40
 #define SYS_mkdir           41
@@ -53,6 +55,9 @@
 #define SYS_trace_emit      70
 #define SYS_sysinfo         71
 #define SYS_sched_switches  72
+
+#define STRAT_CHANNEL_MAX_MESSAGE     512
+#define STRAT_CHANNEL_QUEUE_CAPACITY  8
 
 /* Futex operations */
 #define FUTEX_WAIT          0

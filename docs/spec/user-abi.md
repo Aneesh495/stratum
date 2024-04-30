@@ -63,3 +63,19 @@ and `EFAULT` if the mapping disappears. Timeouts are bounded to 60 seconds
 and rounded up to the 10 ms guest timer. A wake returns the number of
 matching waiters released, up to the caller's limit. User code owns the
 word and uses atomic loads and stores to publish its condition.
+
+`pipe2` creates a byte stream. A pipe write of at most 512 bytes commits
+as a unit. Larger writes can report partial progress. `strat_channel_pair`
+creates two bidirectional endpoints with eight messages of up to 512
+bytes queued in each direction. Each nonempty channel write sends one
+message. A short or invalid receive buffer leaves the message queued.
+Both calls accept `O_NONBLOCK` and `O_CLOEXEC`. A nonblocking operation
+that cannot progress returns `EAGAIN`. Closing the last peer reference
+causes reads to return EOF after queued data and writes to return `EPIPE`.
+
+`poll` reports `POLLNVAL` if an observed descriptor is closed or replaced.
+Descriptor generations prevent a waiter from following a recycled number.
+Readiness changes in IPC, serial input, and the network stack wake
+waiters to rescan. Deadlines and notifications use the same scheduler
+wait mechanism. Console input falls back to timed checks when the I/O
+APIC cannot route the serial interrupt.

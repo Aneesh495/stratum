@@ -49,6 +49,7 @@ The service acknowledges an append after the guest filesystem flushes it. Identi
 | `make test-boot-campaign` | 45 fresh boots with per-CPU probes, entry debugger checks, and 128 malformed loader or handoff inputs |
 | `make test-exec` | Shell pipelines, disk redirection, and 10,000 real fork/exec/wait cycles on each of 4 and 8 vCPUs |
 | `make test-threads` | 25,000 create/join cycles, 10,000 syscall boundaries, 512 live workers across 32 processes, and 10,000 futex cases per profile |
+| `make test-ipc` | 100,000 pipe and channel transfers, 25,000 readiness cases, and descriptor/page reconciliation per profile |
 | `make test-tlb` | 10,000 shared kernel mapping replacements with per-CPU reads, writes, and retired frame checks per profile |
 | `make test-abi test-storage test-faults` | Guest ABI, COW, pipes, filesystem paths, and deliberate trap handling |
 | `make test-drivers` | 150,000 virtio-blk reads with two full ring wraps |

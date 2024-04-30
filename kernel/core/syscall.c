@@ -6,7 +6,10 @@
 #include <kernel/x86_64.h>
 #include <kernel/process.h>
 #include <kernel/file.h>
+#include <kernel/event.h>
+#include <kernel/uart.h>
 #include <kernel/pipe.h>
+#include <kernel/channel.h>
 #include <kernel/futex.h>
 #include <kernel/vfs.h>
 #include <kernel/socket.h>
@@ -72,6 +75,12 @@ static int64_t sys_read_impl(int fd, void *u_buf, size_t count) {
     file_t *f = fd_get(&proc->fds, fd);
     if (!f) return -STRATUM_EBADF;
 
+    if (f->type == FILE_TYPE_CHANNEL) {
+        int64_t result = channel_read_user(f, u_buf, count);
+        file_close(f);
+        return result;
+    }
+
     if (!f->ops || !f->ops->read) {
         file_close(f);
         return -STRATUM_EINVAL;
@@ -102,6 +111,11 @@ static int64_t sys_write_impl(int fd, const void *u_buf, size_t count) {
 
     file_t *f = fd_get(&proc->fds, fd);
     if (!f) return -STRATUM_EBADF;
+
+    if (f->type == FILE_TYPE_CHANNEL && count > STRAT_CHANNEL_MAX_MESSAGE) {
+        file_close(f);
+        return -STRATUM_EMSGSIZE;
+    }
 
     if (!f->ops || !f->ops->write) {
         file_close(f);
@@ -327,44 +341,41 @@ static int64_t sys_sysinfo_impl(strat_sysinfo_t *u_info) {
     return 0;
 }
 
-static int64_t sys_pipe_impl(int *u_pipefd) {
-    if (!is_user_range_valid(u_pipefd, 2 * sizeof(int))) {
-        return -STRATUM_EFAULT;
-    }
+static int64_t sys_pair_impl(int *out, uint64_t flags, bool channel) {
+    if (flags & ~(uint64_t)(O_CLOEXEC | O_NONBLOCK)) return -STRATUM_EINVAL;
+    if (!is_user_range_valid(out, 2 * sizeof(int))) return -STRATUM_EFAULT;
 
     process_t *proc = process_get_current();
     if (!proc) return -STRATUM_ESRCH;
 
-    file_t *rf = NULL, *wf = NULL;
-    int res = pipe_create(&rf, &wf);
-    if (res != 0) return res;
+    file_t *first, *second;
+    int res = channel ? channel_create(&first, &second) : pipe_create(&first, &second);
+    if (res) return res;
+    first->flags = second->flags = flags & O_NONBLOCK;
 
-    int rfd = fd_alloc(&proc->fds, rf);
-    if (rfd < 0) {
-        file_close(rf);
-        file_close(wf);
-        return rfd;
+    int a = fd_alloc_flags(&proc->fds, first, flags & O_CLOEXEC);
+    if (a < 0) {
+        file_close(first);
+        file_close(second);
+        return a;
+    }
+    int b = fd_alloc_flags(&proc->fds, second, flags & O_CLOEXEC);
+    if (b < 0) {
+        fd_close(&proc->fds, a);
+        file_close(second);
+        return b;
     }
 
-    int wfd = fd_alloc(&proc->fds, wf);
-    if (wfd < 0) {
-        fd_close(&proc->fds, rfd);
-        file_close(wf);
-        return wfd;
-    }
-
-    int k_fds[2] = { rfd, wfd };
-    if (copy_to_user(u_pipefd, k_fds, sizeof(k_fds)) != 0) {
-        fd_close(&proc->fds, rfd);
-        fd_close(&proc->fds, wfd);
+    int descriptors[2] = { a, b };
+    if (copy_to_user(out, descriptors, sizeof(descriptors))) {
+        fd_close(&proc->fds, a);
+        fd_close(&proc->fds, b);
         return -STRATUM_EFAULT;
     }
-
     return 0;
 }
 
 static int64_t sys_poll_impl(struct pollfd *u_fds, uint32_t nfds, int timeout_ms) {
-    if (nfds > 32) return -STRATUM_EINVAL;
     if (!is_user_range_valid(u_fds, nfds * sizeof(struct pollfd))) {
         return -STRATUM_EFAULT;
     }
@@ -377,39 +388,40 @@ static int64_t sys_poll_impl(struct pollfd *u_fds, uint32_t nfds, int timeout_ms
         return -STRATUM_EFAULT;
     }
 
-    uint64_t start_ms = timer_get_uptime_ms();
+    uint64_t identities[32];
+    for (uint32_t i = 0; i < nfds; i++) identities[i] = fd_generation(&proc->fds, k_fds[i].fd);
 
-    while (1) {
+    uint64_t deadline = timeout_ms < 0 ? UINT64_MAX : event_deadline((uint64_t)timeout_ms);
+    for (;;) {
+        uint64_t generation = readiness_generation();
         int ready_count = 0;
+        bool legacy_console = false;
 
         for (uint32_t i = 0; i < nfds; i++) {
-            k_fds[i].revents = 0;
-            if (k_fds[i].fd < 0) continue;
+            struct pollfd *pollfd = &k_fds[i];
+            pollfd->revents = 0;
+            if (pollfd->fd < 0) continue;
 
-            file_t *f = fd_get(&proc->fds, k_fds[i].fd);
-            if (!f) {
-                k_fds[i].revents = POLLNVAL;
-                ready_count++;
-                continue;
+            file_t *file = fd_get_generation(&proc->fds, pollfd->fd, identities[i]);
+            if (!file) {
+                pollfd->revents = POLLNVAL;
+            } else {
+                if (file->ops && file->ops->poll) pollfd->revents = (int16_t)file->ops->poll(file, (uint32_t)pollfd->events);
+                if (file->type == FILE_TYPE_CONSOLE && (pollfd->events & POLLIN) && !uart_rx_uses_irq()) legacy_console = true;
+                file_close(file);
             }
-
-            if (f->ops && f->ops->poll) {
-                int rev = f->ops->poll(f, (uint32_t)k_fds[i].events);
-                k_fds[i].revents = (int16_t)rev;
-                if (rev != 0) {
-                    ready_count++;
-                }
-            }
-            file_close(f);
+            if (pollfd->revents) ready_count++;
         }
 
-        uint64_t elapsed = timer_get_uptime_ms() - start_ms;
-        if (ready_count > 0 || (timeout_ms >= 0 && elapsed >= (uint64_t)timeout_ms)) {
+        uint64_t now = timer_get_ticks();
+        if (ready_count || !timeout_ms || now >= deadline) {
             int result = copy_to_user(u_fds, k_fds, nfds * sizeof(struct pollfd));
-            return result != 0 ? result : ready_count;
+            return result ? result : ready_count;
         }
 
-        thread_sleep_ms(2);
+        /* UART fallback is needed on platforms without a routable I/O APIC. */
+        uint64_t wake_at = legacy_console && now + 1 < deadline ? now + 1 : deadline;
+        readiness_wait(generation, wake_at);
     }
 }
 
@@ -543,10 +555,17 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
     }
 
     case SYS_pipe: {
-        return sys_pipe_impl((int *)regs->rdi);
+        return sys_pair_impl((int *)regs->rdi, 0, false);
+
+    case SYS_pipe2:
+        return sys_pair_impl((int *)regs->rdi, regs->rsi, false);
+
+    case SYS_channel_pair:
+        return sys_pair_impl((int *)regs->rdi, regs->rsi, true);
     }
 
     case SYS_poll: {
+        if (regs->rsi > 32) return -STRATUM_EINVAL;
         return sys_poll_impl((struct pollfd *)regs->rdi, (uint32_t)regs->rsi, (int)regs->rdx);
     }
 

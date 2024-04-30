@@ -197,6 +197,14 @@ static inline int pipe(int pipefd[2]) {
     return (int)syscall1(SYS_pipe, (uint64_t)pipefd);
 }
 
+static inline int pipe2(int descriptors[2], unsigned flags) {
+    return (int)syscall2(SYS_pipe2, (uintptr_t)descriptors, flags);
+}
+
+static inline int strat_channel_pair(int descriptors[2], unsigned flags) {
+    return (int)syscall2(SYS_channel_pair, (uintptr_t)descriptors, flags);
+}
+
 static inline int poll(struct pollfd *fds, uint32_t nfds, int timeout) {
     return (int)syscall3(SYS_poll, (uint64_t)fds, (uint64_t)nfds, (uint64_t)timeout);
 }

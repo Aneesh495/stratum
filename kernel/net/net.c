@@ -1,4 +1,5 @@
 #include <kernel/net.h>
+#include <kernel/event.h>
 #include <kernel/boot.h>
 #include <kernel/ethernet.h>
 #include <kernel/arp.h>
@@ -133,6 +134,7 @@ void net_poll(void) {
 
     tcp_tick();
     static uint8_t rx_raw[2048];
+    bool processed = false;
     for (unsigned budget = 0; budget < 32; budget++) {
         int bytes = virtio_net_receive(dev, rx_raw, sizeof(rx_raw));
         if (bytes <= 0) break;
@@ -146,7 +148,9 @@ void net_poll(void) {
         p->tot_len = (uint16_t)bytes;
 
         ethernet_input(p);
+        processed = true;
     }
+    if (processed) readiness_notify();
 }
 
 static uint32_t boot_ip(void) {

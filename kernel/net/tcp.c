@@ -1,3 +1,4 @@
+#include <kernel/event.h>
 #include <kernel/tcp.h>
 #include <kernel/ipv4.h>
 #include <kernel/sched.h>
@@ -403,11 +404,14 @@ void tcp_tick(void) {
     uint64_t flags;
     spin_lock_irqsave(&tcp_lock, &flags);
     uint64_t now = timer_get_uptime_ms();
+    bool closed = false;
     for (tcp_pcb_t *pcb = connections; pcb;) {
         tcp_pcb_t *next = pcb->next;
         if (pcb->state != TCP_STATE_CLOSED && pcb->snd_nxt != pcb->snd_una && now >= pcb->retry_at) {
-            if (pcb->retries++ == TCP_RETRY_LIMIT) pcb->state = TCP_STATE_CLOSED;
-            else {
+            if (pcb->retries++ == TCP_RETRY_LIMIT) {
+                pcb->state = TCP_STATE_CLOSED;
+                closed = true;
+            } else {
                 output(pcb, pcb->snd_una, pcb->tx_flags, pcb->tx_data, pcb->tx_len);
                 pcb->retry_at = now + ((uint64_t)TCP_RETRY_MS << (pcb->retries > 3 ? 3 : pcb->retries));
             }
@@ -419,4 +423,5 @@ void tcp_tick(void) {
         pcb = next;
     }
     spin_unlock_irqrestore(&tcp_lock, flags);
+    if (closed) readiness_notify();
 }

@@ -55,6 +55,7 @@
 
 /* Standard Vectors */
 #define VEC_APIC_TIMER          0x20
+#define VEC_UART_RX             0x24
 #define VEC_IPI_RESCHED         0x30
 #define VEC_IPI_TLB             0xFD
 #define VEC_IPI_HALT            0xFE
@@ -73,7 +74,7 @@ void     pit_delay_ms(uint32_t ms);
 
 /* I/O APIC */
 void     ioapic_init(void);
-void     ioapic_route_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id);
+bool     ioapic_route_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id);
 void     ioapic_mask_irq(uint8_t irq);
 void     ioapic_unmask_irq(uint8_t irq);
 

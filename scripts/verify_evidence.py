@@ -11,6 +11,7 @@ import sys
 
 from evidence_format import ARTIFACTS, COMMANDS, PROFILES, REQUIRED_TRANSCRIPTS, SCHEMA, file_hash
 from test_replication import check_capture
+from test_ipc import check_transcript
 from test_threads import check_population
 
 
@@ -90,6 +91,8 @@ def verify(root):
         check_population(threads.encode(), cpus)
         check(f"cycles=10000 CPUs={cpus} retired frames verified, final unmap acknowledged" in
               read(f"transcripts/tlb/{cpus}cpu.log"), f"{cpus} CPUs: missing cross-CPU invalidation")
+        check_transcript(read(f"transcripts/ipc/{cpus}cpu.log").encode(),
+                         "bb15c4cb1fd3582d", "f94679431f16ead7")
     for cpus in (1, 2, 4, 8):
         log = read(f"transcripts/diagnostics/stress-{cpus}.log")
         check("64 fork/reap cycles" in log and "128 demand-zero pages" in log and

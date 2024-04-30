@@ -53,6 +53,7 @@ jobs:
           python3 scripts/test_exec.py
           python3 scripts/test_threads.py
           python3 scripts/test_tlb.py
+          python3 scripts/test_ipc.py
       - name: Run the extended boot campaign
         if: github.event_name == 'workflow_dispatch' && inputs.boot_campaign
         run: python3 scripts/test_boot_campaign.py

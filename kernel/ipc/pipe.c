@@ -1,4 +1,5 @@
 #include <kernel/pipe.h>
+#include <kernel/event.h>
 #include <kernel/pmm.h>
 #include <kernel/slab.h>
 #include <kernel/kernel.h>
@@ -30,6 +31,7 @@ static int64_t pipe_read_op(file_t *file, void *buf, size_t count) {
                 pipe->read_idx = (pipe->read_idx + 1) % PIPE_CAPACITY;
             }
             pipe->count -= to_read;
+            if (available == PIPE_CAPACITY) readiness_notify();
 
             /* Wake any blocked writers */
             wait_queue_wake_all(&pipe->write_wait);
@@ -76,7 +78,7 @@ static int64_t pipe_write_op(file_t *file, const void *buf, size_t count) {
         }
 
         size_t space = PIPE_CAPACITY - pipe->count;
-        if (space > 0) {
+        if (space && (count > 512 || space >= count)) {
             size_t to_write = (count - bytes_written < space) ? (count - bytes_written) : space;
 
             for (size_t i = 0; i < to_write; i++) {
@@ -84,6 +86,7 @@ static int64_t pipe_write_op(file_t *file, const void *buf, size_t count) {
                 pipe->write_idx = (pipe->write_idx + 1) % PIPE_CAPACITY;
             }
             pipe->count += to_write;
+            if (space == PIPE_CAPACITY) readiness_notify();
 
             /* Wake any blocked readers */
             wait_queue_wake_all(&pipe->read_wait);
@@ -165,6 +168,7 @@ static int pipe_read_close_op(file_t *file) {
     }
     wait_queue_wake_all(&pipe->write_wait);
 
+    readiness_notify();
     bool should_free = (pipe->readers == 0 && pipe->writers == 0);
     spin_unlock_irqrestore(&pipe->lock, flags);
 
@@ -189,6 +193,7 @@ static int pipe_write_close_op(file_t *file) {
     }
     wait_queue_wake_all(&pipe->read_wait);
 
+    readiness_notify();
     bool should_free = (pipe->readers == 0 && pipe->writers == 0);
     spin_unlock_irqrestore(&pipe->lock, flags);
 

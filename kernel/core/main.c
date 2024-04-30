@@ -79,6 +79,7 @@ static _Noreturn void start_system(void) {
     pipe_init();
     process_init();
     trace_init();
+    uart_enable_rx_irq();
     sti();
 
     if (!strcmp(g_boot_handoff.cmdline, "boot-probe\n")) boot_probe_run();

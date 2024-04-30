@@ -1,4 +1,5 @@
 #include <kernel/socket.h>
+#include <kernel/event.h>
 #include <kernel/process.h>
 #include <kernel/slab.h>
 #include <kernel/string.h>
@@ -169,6 +170,7 @@ int sys_connect(int fd, const struct sockaddr *addr, uint32_t addrlen) {
     uint16_t port = ntohs(sin.sin_port);
     res = socket->type == SOCK_STREAM ? tcp_connect(socket->pcb.tcp, ip, port) :
                                        udp_connect(socket->pcb.udp, ip, port);
+    if (!res) readiness_notify();
     file_close(file);
     return res;
 }
@@ -197,6 +199,7 @@ int sys_shutdown(int fd, int how) {
     if (!file) return -STRATUM_EBADF;
     socket_t *socket = file->priv;
     int res = socket->type == SOCK_STREAM ? tcp_shutdown(socket->pcb.tcp) : -STRATUM_EOPNOTSUPP;
+    if (!res) readiness_notify();
     file_close(file);
     return res;
 }

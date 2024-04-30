@@ -1,4 +1,5 @@
 #include <kernel/file.h>
+#include <kernel/event.h>
 #include <kernel/slab.h>
 #include <kernel/kernel.h>
 #include <kernel/string.h>
@@ -14,8 +15,12 @@ static int64_t console_read(file_t *file, void *buf, size_t count) {
     if (count == 0) return 0;
 
     int ch;
-    while ((ch = uart_getc_nonblocking()) < 0) {
-        thread_sleep_ms(10);
+    for (;;) {
+        uint64_t generation = readiness_generation();
+        ch = uart_getc_nonblocking();
+        if (ch >= 0) break;
+        if (uart_rx_uses_irq()) readiness_wait(generation, (uint64_t)-1);
+        else thread_sleep_ms(10);
     }
     ((char *)buf)[0] = (char)ch;
     return 1;
@@ -99,6 +104,7 @@ void fd_table_init(fd_table_t *table) {
     for (int i = 0; i < PROCESS_MAX_FDS; i++) {
         table->files[i] = NULL;
         table->flags[i] = 0;
+        table->generation[i] = 0;
     }
 }
 
@@ -140,6 +146,7 @@ void fd_close_exec(fd_table_t *table) {
             closing[count++] = table->files[i];
             table->files[i] = NULL;
             table->flags[i] = 0;
+            table->generation[i]++;
         }
     }
     spin_unlock_irqrestore(&table->lock, irq);
@@ -156,6 +163,7 @@ int fd_alloc_flags(fd_table_t *table, file_t *file, uint32_t descriptor_flags) {
         if (!table->files[i]) {
             table->files[i] = file;
             table->flags[i] = descriptor_flags;
+            table->generation[i]++;
             spin_unlock_irqrestore(&table->lock, flags);
             return i;
         }
@@ -174,26 +182,46 @@ int fd_install(fd_table_t *table, int fd, file_t *file) {
     file_t *old = table->files[fd];
     table->files[fd] = file;
     table->flags[fd] = 0;
+    table->generation[fd]++;
 
     spin_unlock_irqrestore(&table->lock, flags);
 
     if (old) {
+        readiness_notify();
         file_close(old);
     }
     return 0;
 }
 
-file_t *fd_get(fd_table_t *table, int fd) {
+static file_t *fd_get_internal(fd_table_t *table, int fd, const uint64_t *generation) {
     if (!table || fd < 0 || fd >= PROCESS_MAX_FDS) return NULL;
 
     uint64_t flags;
     spin_lock_irqsave(&table->lock, &flags);
-    file_t *f = table->files[fd];
-    if (f) {
-        file_ref(f);
+    file_t *f = NULL;
+    if (!generation || *generation == table->generation[fd]) {
+        f = table->files[fd];
+        if (f) file_ref(f);
     }
     spin_unlock_irqrestore(&table->lock, flags);
     return f;
+}
+
+file_t *fd_get(fd_table_t *table, int fd) {
+    return fd_get_internal(table, fd, NULL);
+}
+
+file_t *fd_get_generation(fd_table_t *table, int fd, uint64_t generation) {
+    return fd_get_internal(table, fd, &generation);
+}
+
+uint64_t fd_generation(fd_table_t *table, int fd) {
+    if (!table || fd < 0 || fd >= PROCESS_MAX_FDS) return 0;
+    uint64_t flags;
+    spin_lock_irqsave(&table->lock, &flags);
+    uint64_t generation = table->generation[fd];
+    spin_unlock_irqrestore(&table->lock, flags);
+    return generation;
 }
 
 int fd_close(fd_table_t *table, int fd) {
@@ -204,9 +232,11 @@ int fd_close(fd_table_t *table, int fd) {
     file_t *f = table->files[fd];
     table->files[fd] = NULL;
     table->flags[fd] = 0;
+    if (f) table->generation[fd]++;
     spin_unlock_irqrestore(&table->lock, flags);
 
     if (!f) return -STRATUM_EBADF;
+    readiness_notify();
     file_close(f);
     return 0;
 }
@@ -235,10 +265,12 @@ int fd_dup2(fd_table_t *table, int oldfd, int newfd) {
     file_t *old_dst = table->files[newfd];
     table->files[newfd] = src;
     table->flags[newfd] = 0;
+    table->generation[newfd]++;
 
     spin_unlock_irqrestore(&table->lock, flags);
 
     if (old_dst) {
+        readiness_notify();
         file_close(old_dst);
     }
 
