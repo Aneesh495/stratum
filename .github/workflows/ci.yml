@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
       storage_campaign:
-        description: Run the 100-interruption StrataFS campaign
+        description: Run the mixed filesystem and 100-interruption WAL campaigns
         type: boolean
         default: false
 
@@ -22,7 +22,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install build and VM dependencies
@@ -44,6 +44,7 @@ jobs:
         run: |
           make test fuzz
           python3 tests/host/wait_tlb_model.py
+          python3 tests/host/wal_model.py
       - name: Build and exercise QEMU guests
         run: |
           make -j2 smoke
@@ -59,7 +60,9 @@ jobs:
         run: python3 scripts/test_boot_campaign.py
       - name: Run the extended storage campaign
         if: github.event_name == 'workflow_dispatch' && inputs.storage_campaign
-        run: python3 scripts/test_wal_crash.py --repeats 10
+        run: |
+          python3 scripts/test_storage_mixed.py
+          python3 scripts/test_wal_crash.py --repeats 10
       - name: Preserve guest transcripts
         if: always()
         uses: actions/upload-artifact@v4

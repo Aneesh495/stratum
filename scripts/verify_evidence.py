@@ -69,6 +69,8 @@ def verify(root):
     model = read("logs/wait-tlb-model.log")
     check("wait rejected negative control" in model and "TLB rejected negative control" in model,
           "wait or TLB model negative control missing")
+    check("validated 5000 crash states and rejected 1500 corrupt states" in read("logs/wal-model.log"),
+          "WAL model operation counts missing")
     check(read("logs/boot.log").count("[PASS] rejected ") == 17, "loader rejection count mismatch")
     for cpus, memory in PROFILES:
         name = f"{cpus}cpu-{memory}"

@@ -53,6 +53,7 @@ The service acknowledges an append after the guest filesystem flushes it. Identi
 | `make test-tlb` | 10,000 shared kernel mapping replacements with per-CPU reads, writes, and retired frame checks per profile |
 | `make test-abi test-storage test-faults` | Guest ABI, COW, pipes, filesystem paths, and deliberate trap handling |
 | `make test-drivers` | 150,000 virtio-blk reads with two full ring wraps |
+| `make test-storage-mixed` | 128,006 mixed filesystem operations, reboot verification, six corrupt namespace checks, and the WAL model |
 | `make test-storage-crash` | 100 forced VM interruptions across ten WAL stages |
 | `make evidence` | Tests and two clean builds from the committed source |
 | `make verify` | Read-only validation of a generated regression bundle |

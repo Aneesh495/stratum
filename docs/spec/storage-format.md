@@ -23,3 +23,11 @@ Recovery validates the published descriptor, sequence, targets, commit record, a
 `scripts/test_recovery.py` tests a VM interruption after the published range is durable and before home writes. This is a QEMU process-interruption test. The storage device's flush behavior defines the durability boundary.
 `make test-storage-crash` repeats ten interruption points ten times each and
 records the expected old or new record, replay result, and disk hashes.
+
+The offline checker walks inode parent relationships back to root. It
+checks namespace reachability, directory cycles, duplicate names, entry
+types, dot entries, link counts, block ownership, and allocation counts.
+`make test-storage-mixed` runs 128,006 checked operations against a
+disposable volume, reboots it, verifies a durable fixture, and checks
+that six deliberately corrupted copies are rejected. The separate WAL
+model exercises 5,000 simulated crash states and 1,500 corrupted states.

@@ -25,6 +25,13 @@
 #define STRATAFS_INODES_PER_BLOCK   (STRATAFS_BLOCK_SIZE / STRATAFS_INODE_SIZE)
 #define STRATAFS_ROOT_INO           1
 #define STRATAFS_NDIR_BLOCKS        12
+#define STRATAFS_NIND_BLOCKS        (STRATAFS_BLOCK_SIZE / sizeof(uint32_t))
+#define STRATAFS_ADDRESSABLE        (STRATAFS_NDIR_BLOCKS + STRATAFS_NIND_BLOCKS)
+#define STRATAFS_NAME_LIMIT         63
+#define STRATAFS_MAX_INODES         2048
+#define MODE_TYPE                  0170000
+#define MODE_DIR                   0040000
+#define MODE_FILE                  0100000
 
 #define JOURNAL_MAGIC_SB            0x4A4F55524E414C31ULL /* "JOURNAL1" */
 
@@ -67,7 +74,8 @@ typedef struct {
     uint32_t indirect;
     uint32_t double_indirect;
     uint32_t flags;
-    uint32_t reserved[5];
+    uint32_t generation;
+    uint32_t reserved[4];
 } __attribute__((packed)) stratafs_disk_inode_t;
 
 typedef struct {
@@ -122,20 +130,146 @@ static uint32_t crc32(const void *data, size_t len) {
     return ~value;
 }
 
-static bool valid_directory_block(FILE *fp, uint32_t block, uint32_t ino, uint32_t limit,
-                                  const uint8_t *inode_bitmap) {
+typedef struct {
+    uint32_t parent, dotdot, child_dirs;
+    bool dot, dotdot_seen;
+} namespace_entry_t;
+
+typedef struct {
+    char name[STRATAFS_NAME_LIMIT + 1];
+} directory_name_t;
+
+static int compare_names(const void *lhs, const void *rhs) {
+    const directory_name_t *a = lhs, *b = rhs;
+    return strcmp(a->name, b->name);
+}
+
+static bool scan_directory_block(FILE *fp, uint32_t block, uint32_t ino, uint32_t limit,
+                                 const uint8_t *allocated, const stratafs_disk_inode_t *inodes,
+                                 namespace_entry_t *nodes, directory_name_t *names, size_t *name_count) {
     stratafs_disk_dirent_t entries[STRATAFS_BLOCK_SIZE / sizeof(stratafs_disk_dirent_t)];
     if (!read_block(fp, block, entries)) return false;
     for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
         const stratafs_disk_dirent_t *entry = &entries[i];
-        if (!entry->inode_num) continue;
+        uint32_t target = entry->inode_num;
+        if (!target) continue;
         if (entry->record_len != sizeof(*entry) || !entry->name_len ||
-            entry->name_len >= sizeof(entry->name) ||
+            entry->name_len > STRATAFS_NAME_LIMIT ||
             memchr(entry->name, 0, entry->name_len) ||
             memchr(entry->name, '/', entry->name_len) ||
-            entry->inode_num >= limit || !bitmap_get(inode_bitmap, entry->inode_num) ||
-            (entry->file_type != 1 && entry->file_type != 2)) {
-            fprintf(stderr, "Error: malformed directory entry in inode %u, slot %zu.\n", ino, i);
+            target >= limit || !bitmap_get(allocated, target)) {
+            fprintf(stderr, "Error: malformed directory entry in inode %u, block %u, slot %zu.\n", ino, block, i);
+            return false;
+        }
+        uint16_t type = inodes[target].mode & MODE_TYPE;
+        if (!((type == MODE_FILE && entry->file_type == 1) ||
+              (type == MODE_DIR && entry->file_type == 2))) {
+            fprintf(stderr, "Error: directory inode %u has a type mismatch for inode %u.\n", ino, target);
+            return false;
+        }
+
+        char *name = names[(*name_count)++].name;
+        memcpy(name, entry->name, entry->name_len);
+        name[entry->name_len] = 0;
+        if (!strcmp(name, ".")) {
+            if (nodes[ino].dot || target != ino) return false;
+            nodes[ino].dot = true;
+        } else if (!strcmp(name, "..")) {
+            if (nodes[ino].dotdot_seen || type != MODE_DIR) return false;
+            nodes[ino].dotdot_seen = true;
+            nodes[ino].dotdot = target;
+        } else {
+            if (nodes[target].parent || target == STRATAFS_ROOT_INO) {
+                fprintf(stderr, "Error: inode %u has multiple namespace references or is the root.\n", target);
+                return false;
+            }
+            nodes[target].parent = ino;
+            if (type == MODE_DIR) nodes[ino].child_dirs++;
+        }
+    }
+    return true;
+}
+
+static bool mark_data(const stratafs_sb_t *sb, uint8_t *used, uint32_t inode, uint32_t block) {
+    if (block < sb->data_start_block || block >= sb->total_blocks || bitmap_get(used, block)) {
+        fprintf(stderr, "Error: inode %u references invalid or multiply owned block %u.\n", inode, block);
+        return false;
+    }
+    bitmap_set(used, block);
+    return true;
+}
+
+static bool scan_inode(FILE *fp, const stratafs_sb_t *sb, uint32_t ino,
+                       const stratafs_disk_inode_t *inodes, const uint8_t *allocated,
+                       uint8_t *blocks, namespace_entry_t *nodes, directory_name_t *names) {
+    const stratafs_disk_inode_t *inode = &inodes[ino];
+    uint16_t type = inode->mode & MODE_TYPE;
+    bool directory = type == MODE_DIR;
+    if ((!directory && type != MODE_FILE) || (ino == STRATAFS_ROOT_INO && !directory) ||
+        !inode->nlink || !inode->generation || inode->double_indirect ||
+        inode->size > STRATAFS_ADDRESSABLE * STRATAFS_BLOCK_SIZE ||
+        (directory && (!inode->size || inode->size % STRATAFS_BLOCK_SIZE))) {
+        fprintf(stderr, "Error: inode %u has invalid metadata.\n", ino);
+        return false;
+    }
+
+    uint32_t logical = (uint32_t)((inode->size + STRATAFS_BLOCK_SIZE - 1) / STRATAFS_BLOCK_SIZE);
+    uint32_t addresses[STRATAFS_ADDRESSABLE] = {0};
+    memcpy(addresses, inode->direct, sizeof(inode->direct));
+    unsigned owned = 0;
+    if (inode->indirect) {
+        if (logical <= STRATAFS_NDIR_BLOCKS || !mark_data(sb, blocks, ino, inode->indirect) ||
+            !read_block(fp, inode->indirect, addresses + STRATAFS_NDIR_BLOCKS)) return false;
+        owned++;
+    }
+
+    size_t name_count = 0;
+    for (uint32_t i = 0; i < STRATAFS_ADDRESSABLE; i++) {
+        uint32_t block = addresses[i];
+        if (!block && (!directory || i >= logical)) continue;
+        if (!block || i >= logical || !mark_data(sb, blocks, ino, block)) {
+            fprintf(stderr, "Error: inode %u has an invalid block at logical index %u.\n", ino, i);
+            return false;
+        }
+        owned++;
+        if (directory && !scan_directory_block(fp, block, ino, sb->total_inodes, allocated,
+                                                inodes, nodes, names, &name_count)) return false;
+    }
+
+    if (inode->blocks != (uint64_t)owned * (STRATAFS_BLOCK_SIZE / 512)) {
+        fprintf(stderr, "Error: inode %u block count disagrees with its pointers.\n", ino);
+        return false;
+    }
+    if (directory) {
+        qsort(names, name_count, sizeof(*names), compare_names);
+        for (size_t i = 1; i < name_count; i++) {
+            if (compare_names(&names[i - 1], &names[i]) == 0) {
+                fprintf(stderr, "Error: duplicate name in directory inode %u.\n", ino);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool check_namespace(const stratafs_disk_inode_t *inodes, const uint8_t *allocated,
+                            const namespace_entry_t *nodes, uint32_t limit) {
+    for (uint32_t ino = 1; ino < limit; ino++) {
+        if (!bitmap_get(allocated, ino)) continue;
+        const namespace_entry_t *node = &nodes[ino];
+        bool root = ino == STRATAFS_ROOT_INO;
+        uint32_t parent = root ? STRATAFS_ROOT_INO : node->parent;
+        bool directory = (inodes[ino].mode & MODE_TYPE) == MODE_DIR;
+        if (!parent || (directory && (!node->dot || !node->dotdot_seen || node->dotdot != parent)) ||
+            inodes[ino].nlink != (directory ? 2 + node->child_dirs : 1)) {
+            fprintf(stderr, "Error: inode %u has an invalid namespace parent or link count.\n", ino);
+            return false;
+        }
+        for (uint32_t hops = 0; parent && parent != STRATAFS_ROOT_INO && hops < limit; hops++) {
+            parent = nodes[parent].parent;
+        }
+        if (parent != STRATAFS_ROOT_INO) {
+            fprintf(stderr, "Error: inode %u is in a namespace cycle or disconnected subtree.\n", ino);
             return false;
         }
     }
@@ -176,8 +310,9 @@ int main(int argc, char **argv) {
     if (image_bytes < 0 || sb.magic != STRATAFS_MAGIC || sb.version != STRATAFS_VERSION ||
         sb.block_size != STRATAFS_BLOCK_SIZE || sb.total_blocks < 1024 ||
         sb.total_blocks > STRATAFS_BLOCK_SIZE * 8U ||
+        image_bytes % STRATAFS_BLOCK_SIZE ||
         sb.total_blocks != (uint64_t)image_bytes / STRATAFS_BLOCK_SIZE ||
-        sb.total_inodes != 2048 || sb.root_inode != STRATAFS_ROOT_INO ||
+        sb.total_inodes != STRATAFS_MAX_INODES || sb.root_inode != STRATAFS_ROOT_INO ||
         sb.block_bitmap_block != 2 || sb.block_bitmap_blocks != 1 ||
         sb.inode_bitmap_block != 3 || sb.inode_bitmap_blocks != 1 ||
         sb.inode_table_block != 4 || sb.inode_table_blocks != 64 ||
@@ -237,95 +372,37 @@ int main(int argc, char **argv) {
     uint32_t reg_count = 0;
     bool has_error = !bitmap_get(disk_i_bitmap, 0) || !bitmap_get(disk_i_bitmap, STRATAFS_ROOT_INO);
 
-    uint8_t inode_buf[STRATAFS_BLOCK_SIZE];
-
-    for (uint32_t ino = 1; ino < sb.total_inodes; ino++) {
-        bool is_alloc = bitmap_get(disk_i_bitmap, ino);
-        if (!is_alloc) continue;
-
-        active_inodes++;
-
-        uint32_t block_idx = sb.inode_table_block + (ino / STRATAFS_INODES_PER_BLOCK);
-        uint32_t offset = (ino % STRATAFS_INODES_PER_BLOCK) * STRATAFS_INODE_SIZE;
-
-        if (!read_block(fp, block_idx, inode_buf)) {
-            fprintf(stderr, "Error: failed to read inode table block %u for ino %u\n", block_idx, ino);
+    stratafs_disk_inode_t *inodes = calloc(sb.total_inodes, sizeof(*inodes));
+    namespace_entry_t *nodes = calloc(sb.total_inodes, sizeof(*nodes));
+    size_t name_slots = STRATAFS_ADDRESSABLE * (STRATAFS_BLOCK_SIZE / sizeof(stratafs_disk_dirent_t));
+    directory_name_t *names = calloc(name_slots, sizeof(*names));
+    if (!inodes || !nodes || !names) {
+        fprintf(stderr, "Error: cannot allocate checker workspace.\n");
+        has_error = true;
+    }
+    for (uint32_t i = 0; !has_error && i < sb.inode_table_blocks; i++) {
+        if (!read_block(fp, sb.inode_table_block + i, inodes + i * STRATAFS_INODES_PER_BLOCK)) {
+            fprintf(stderr, "Error: cannot read inode table block %u.\n", i);
             has_error = true;
-            break;
-        }
-
-        stratafs_disk_inode_t *din = (stratafs_disk_inode_t *)(inode_buf + offset);
-        uint16_t type = din->mode & 0170000;
-        if (type == 0040000) dir_count++;
-        else if (type == 0100000) reg_count++;
-        if ((type != 0040000 && type != 0100000) ||
-            (ino == STRATAFS_ROOT_INO && type != 0040000) ||
-            !din->nlink || din->double_indirect) {
-            fprintf(stderr, "Error: inode %u has invalid type, link count or addressing.\n", ino);
-            has_error = true;
-        }
-
-        /* Check direct block pointers */
-        for (int d = 0; d < STRATAFS_NDIR_BLOCKS; d++) {
-            uint32_t bnum = din->direct[d];
-            if (bnum == 0) continue;
-
-            if (bnum < sb.data_start_block || bnum >= sb.total_blocks) {
-                fprintf(stderr, "Error: inode %u direct block %d out of bounds: %u\n", ino, d, bnum);
-                has_error = true;
-                continue;
-            }
-
-            if (bitmap_get(reach_b_bitmap, bnum)) {
-                fprintf(stderr, "Error: block %u multiply referenced by inode %u\n", bnum, ino);
-                has_error = true;
-            }
-            bitmap_set(reach_b_bitmap, bnum);
-
-            if (type == 0040000 && !valid_directory_block(fp, bnum, ino, sb.total_inodes, disk_i_bitmap)) {
-                has_error = true;
-            }
-        }
-
-        /* Check single indirect block pointer */
-        if (din->indirect != 0) {
-            uint32_t iblk = din->indirect;
-            if (iblk < sb.data_start_block || iblk >= sb.total_blocks) {
-                fprintf(stderr, "Error: inode %u indirect block out of bounds: %u\n", ino, iblk);
-                has_error = true;
-            } else {
-                if (bitmap_get(reach_b_bitmap, iblk)) {
-                    fprintf(stderr, "Error: indirect block %u multiply referenced.\n", iblk);
-                    has_error = true;
-                }
-                bitmap_set(reach_b_bitmap, iblk);
-                uint32_t indir_ptrs[STRATAFS_BLOCK_SIZE / sizeof(uint32_t)];
-                if (read_block(fp, iblk, indir_ptrs)) {
-                    for (size_t p = 0; p < (STRATAFS_BLOCK_SIZE / sizeof(uint32_t)); p++) {
-                        uint32_t pb = indir_ptrs[p];
-                        if (pb == 0) continue;
-                        if (pb < sb.data_start_block || pb >= sb.total_blocks) {
-                            fprintf(stderr, "Error: inode %u indirect child block out of bounds: %u\n", ino, pb);
-                            has_error = true;
-                            continue;
-                        }
-                        if (bitmap_get(reach_b_bitmap, pb)) {
-                            fprintf(stderr, "Error: block %u multiply referenced in indirect block of ino %u\n", pb, ino);
-                            has_error = true;
-                        }
-                        bitmap_set(reach_b_bitmap, pb);
-                        if (type == 0040000 && !valid_directory_block(fp, pb, ino, sb.total_inodes, disk_i_bitmap)) {
-                            has_error = true;
-                        }
-                    }
-                } else {
-                    has_error = true;
-                }
-            }
         }
     }
-
-    printf("[OK] Inode table scan: %u active inodes (%u directories, %u files)\n",
+    for (uint32_t ino = 1; !has_error && ino < sb.total_inodes; ino++) {
+        if (!bitmap_get(disk_i_bitmap, ino)) continue;
+        active_inodes++;
+        if ((inodes[ino].mode & MODE_TYPE) == MODE_DIR) dir_count++;
+        else reg_count++;
+        if (!scan_inode(fp, &sb, ino, inodes, disk_i_bitmap, reach_b_bitmap, nodes, names)) has_error = true;
+    }
+    if (!has_error) has_error = !check_namespace(inodes, disk_i_bitmap, nodes, sb.total_inodes);
+    free(names);
+    free(nodes);
+    free(inodes);
+    if (has_error) {
+        fprintf(stderr, "Error: inode or directory namespace verification failed.\n");
+        fclose(fp);
+        return 1;
+    }
+    printf("[OK] Namespace: %u reachable inodes (%u directories, %u files)\n",
            active_inodes, dir_count, reg_count);
 
     /* 5. Cross-check Reachable Blocks with On-Disk Block Bitmap */

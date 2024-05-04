@@ -3,10 +3,11 @@
 from hashlib import sha256
 
 
-SCHEMA = 5
+SCHEMA = 6
 ARTIFACTS = (
     "BOOTX64.EFI", "stratum.elf", "initramfs.cpio", "user_init.elf", "user_test.elf",
     "user_tools.elf", "user_exec_campaign.elf", "user_thread_campaign.elf", "user_ipc_campaign.elf",
+    "user_fs_campaign.elf",
     "images/stratum-boot.img", "images/stratum-data.img",
 )
 COMMANDS = {
@@ -17,6 +18,7 @@ COMMANDS = {
     "boot": ("python3", "scripts/test_boot.py"),
     "exec": ("python3", "scripts/test_exec.py"),
     "wait-tlb-model": ("python3", "tests/host/wait_tlb_model.py"),
+    "wal-model": ("python3", "tests/host/wal_model.py"),
     "tlb": ("python3", "scripts/test_tlb.py"),
     "ipc": ("python3", "scripts/test_ipc.py"),
     "threads": ("python3", "scripts/test_threads.py"),
