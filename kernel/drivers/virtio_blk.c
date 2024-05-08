@@ -53,6 +53,10 @@ static int64_t submit_request(virtio_blk_dev_t *dev, uint32_t type, uint64_t sec
             if (bytes && type == VIRTIO_BLK_T_IN) memcpy(buf, request_data, bytes);
             return bytes;
         }
+        if (virtqueue_faulted(dev->vq)) {
+            dev->failed = true;
+            return -STRATUM_EIO;
+        }
         cpu_pause();
     }
     dev->failed = true;

@@ -31,9 +31,11 @@ typedef uint64_t           uintptr_t;
 typedef uint64_t           size_t;
 #endif
 
+#if !__STDC_HOSTED__
 typedef int64_t            ssize_t;
 typedef int64_t            off_t;
 typedef int32_t            pid_t;
+#endif
 typedef int32_t            tid_t;
 
 #ifndef bool

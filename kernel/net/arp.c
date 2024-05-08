@@ -1,3 +1,4 @@
+#include <kernel/spinlock.h>
 #include <kernel/arp.h>
 #include <kernel/ethernet.h>
 #include <kernel/sched.h>

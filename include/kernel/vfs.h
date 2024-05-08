@@ -2,13 +2,13 @@
 #define STRATUM_KERNEL_VFS_H
 
 #include <kernel/types.h>
+#include <kernel/vfs_format.h>
 #include <kernel/file.h>
 #include <kernel/spinlock.h>
 #include <shared/syscall_nums.h>
 
 #define VFS_APPEND_OFFSET ((uint64_t)-1)
 #define VFS_MAX_PATH        256
-#define VFS_MAX_NAME        64
 #define VFS_MAX_MOUNTS      16
 
 /* Standard File Open Flags */
@@ -35,14 +35,6 @@
 #define VFS_TYPE_CHR        0x03
 #define VFS_TYPE_BLK        0x04
 #define VFS_TYPE_FIFO       0x05
-
-/* File Mode Bits */
-#define VFS_MODE_IFMT       0xF000
-#define VFS_MODE_IFREG      0x8000
-#define VFS_MODE_IFDIR      0x4000
-#define VFS_MODE_IFCHR      0x2000
-#define VFS_MODE_IFBLK      0x6000
-#define VFS_MODE_IFIFO      0x1000
 
 typedef struct vfs_stat {
     uint64_t st_ino;

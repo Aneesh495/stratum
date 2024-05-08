@@ -267,6 +267,10 @@ static inline int strat_getcpu(void) {
     return (int)syscall0(SYS_getcpu);
 }
 
+static inline int strat_net_queues(strat_queue_stats_t queues[2]) {
+    return (int)syscall1(SYS_net_queues, (uintptr_t)queues);
+}
+
 static inline int64_t strat_sched_switches(unsigned cpu) {
     return syscall1(SYS_sched_switches, cpu);
 }

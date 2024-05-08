@@ -32,10 +32,11 @@ void *acpi_find_table(const char *sig) {
 
     if (g_xsdt) {
         uint32_t entries = (g_xsdt->length - sizeof(acpi_sdt_header_t)) / 8;
-        uint64_t *table_ptrs = (uint64_t *)((uint8_t *)g_xsdt + sizeof(acpi_sdt_header_t));
+        const uint8_t *table_ptrs = (const uint8_t *)g_xsdt + sizeof(acpi_sdt_header_t);
 
         for (uint32_t i = 0; i < entries; i++) {
-            uint64_t phys = table_ptrs[i];
+            uint64_t phys;
+            memcpy(&phys, table_ptrs + i * sizeof(phys), sizeof(phys));
             if (phys == 0) continue;
             acpi_sdt_header_t *hdr = get_sdt(phys);
             if (hdr && memcmp(hdr->signature, sig, 4) == 0) return hdr;
@@ -53,62 +54,6 @@ void *acpi_find_table(const char *sig) {
     }
 
     return NULL;
-}
-
-static int acpi_parse_madt(acpi_madt_t *madt) {
-    if (madt->header.length < sizeof(*madt)) return -1;
-
-    g_acpi_info.lapic_phys = madt->lapic_addr;
-    uint8_t *cur = (uint8_t *)madt + sizeof(acpi_madt_t);
-    uint8_t *end = (uint8_t *)madt + madt->header.length;
-
-    while (cur < end) {
-        if ((size_t)(end - cur) < sizeof(madt_entry_header_t)) return -1;
-        const madt_entry_header_t *entry = (const madt_entry_header_t *)cur;
-        if (entry->length < sizeof(*entry) || entry->length > end - cur) return -1;
-
-        switch (entry->type) {
-            case MADT_TYPE_LAPIC: {
-                if (entry->length < sizeof(madt_lapic_t)) return -1;
-                madt_lapic_t *lapic = (madt_lapic_t *)cur;
-                if (g_acpi_info.cpu_count < ACPI_MAX_CPUS) {
-                    uint32_t idx = g_acpi_info.cpu_count++;
-                    g_acpi_info.cpu_apic_ids[idx] = lapic->apic_id;
-                    g_acpi_info.cpu_enabled[idx] = (lapic->flags & 0x03) != 0;
-                }
-                break;
-            }
-            case MADT_TYPE_IOAPIC: {
-                if (entry->length < sizeof(madt_ioapic_t)) return -1;
-                madt_ioapic_t *ioapic = (madt_ioapic_t *)cur;
-                if (g_acpi_info.ioapic_count < ACPI_MAX_IOAPICS) {
-                    uint32_t idx = g_acpi_info.ioapic_count++;
-                    g_acpi_info.ioapic_phys[idx] = ioapic->ioapic_addr;
-                    g_acpi_info.ioapic_gsi_base[idx] = ioapic->gsi_base;
-                }
-                break;
-            }
-            case MADT_TYPE_ISO: {
-                if (entry->length < sizeof(madt_iso_t)) return -1;
-                madt_iso_t *iso = (madt_iso_t *)cur;
-                if (g_acpi_info.iso_count < ACPI_MAX_ISOS) {
-                    g_acpi_info.isos[g_acpi_info.iso_count++] = *iso;
-                }
-                break;
-            }
-            case MADT_TYPE_LAPIC_ADDR_OVERRIDE: {
-                if (entry->length < 12) return -1;
-                memcpy(&g_acpi_info.lapic_phys, cur + 4, sizeof(g_acpi_info.lapic_phys));
-                break;
-            }
-            default:
-                break;
-        }
-
-        cur += entry->length;
-    }
-    if (g_acpi_info.lapic_phys > STRATUM_BOOT_PHYS_LIMIT - PAGE_SIZE) return -1;
-    return 0;
 }
 
 int acpi_init(const boot_handoff_t *handoff) {
@@ -160,7 +105,7 @@ int acpi_init(const boot_handoff_t *handoff) {
     }
 
     kprintf("[ACPI] MADT table found at 0x%p (length: %u bytes)\n", madt, madt->header.length);
-    if (acpi_parse_madt(madt) != 0) {
+    if (acpi_parse_madt(madt, madt->header.length, &g_acpi_info) != 0) {
         memset(&g_acpi_info, 0, sizeof(g_acpi_info));
         return -6;
     }

@@ -13,6 +13,7 @@
 #include <kernel/futex.h>
 #include <kernel/vfs.h>
 #include <kernel/socket.h>
+#include <kernel/virtio_net.h>
 #include <kernel/trace.h>
 #include <kernel/pmm.h>
 #include <kernel/string.h>
@@ -483,6 +484,15 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
 
     case SYS_getcpu:
         return smp_get_cpu_id();
+
+    case SYS_net_queues: {
+        virtio_net_dev_t *net = virtio_net_get_primary();
+        if (!net) return -STRATUM_ENODEV;
+        strat_queue_stats_t queues[2];
+        virtqueue_snapshot(net->rx_vq, &queues[0]);
+        virtqueue_snapshot(net->tx_vq, &queues[1]);
+        return copy_to_user((void *)regs->rdi, queues, sizeof(queues));
+    }
 
     case SYS_sched_switches:
         if (regs->rdi >= smp_get_online_cpus()) return -STRATUM_EINVAL;

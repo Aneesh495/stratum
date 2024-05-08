@@ -3,6 +3,7 @@
 
 #include <kernel/types.h>
 #include <kernel/spinlock.h>
+#include <shared/syscall_nums.h>
 
 #define VRING_DESC_F_NEXT       1
 #define VRING_DESC_F_WRITE      2
@@ -50,6 +51,8 @@ typedef struct virtqueue {
     uint16_t            num_free;
     uint16_t            free_head;
     uint16_t            last_used_idx;
+    uint64_t            submitted, completed;
+    bool                failed;
 
     uint64_t            mem_phys;
     size_t              mem_size;
@@ -57,7 +60,7 @@ typedef struct virtqueue {
 
     vring_desc_t       *desc;
     vring_avail_t      *avail;
-    vring_used_t       *used;
+    volatile vring_used_t *used;
 
     void              **cookies;
 
@@ -74,5 +77,7 @@ int          virtqueue_add_buf(virtqueue_t *vq, const vring_buf_t *bufs,
 void         virtqueue_kick(virtqueue_t *vq);
 void        *virtqueue_get_buf(virtqueue_t *vq, uint32_t *out_len);
 bool         virtqueue_has_used(virtqueue_t *vq);
+bool         virtqueue_faulted(virtqueue_t *vq);
+void         virtqueue_snapshot(virtqueue_t *vq, strat_queue_stats_t *stats);
 
 #endif /* STRATUM_KERNEL_VIRTQUEUE_H */

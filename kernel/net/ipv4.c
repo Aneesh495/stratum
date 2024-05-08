@@ -14,46 +14,24 @@ void ipv4_init(void) {
 }
 
 int ipv4_input(pbuf_t *p) {
-    if (!p || p->len < sizeof(ip_hdr_t)) return -STRATUM_EINVAL;
-
-    ip_hdr_t *iph = (ip_hdr_t *)p->payload;
-    uint8_t ver = (iph->ver_ihl >> 4) & 0x0F;
-    uint8_t ihl = (iph->ver_ihl & 0x0F) * 4;
-
-    if (ver != 4 || ihl < sizeof(ip_hdr_t) || p->len < ihl) {
-        return -STRATUM_EINVAL;
-    }
-
-    /* Verify checksum */
-    uint16_t csum = net_checksum(iph, ihl);
-    if (csum != 0) {
-        return -STRATUM_EIO;
-    }
-
-    uint32_t src_ip = ntohl(iph->src_ip);
-    uint32_t dst_ip = ntohl(iph->dst_ip);
-    uint16_t total_len = ntohs(iph->total_len);
+    if (!p) return -STRATUM_EINVAL;
+    ipv4_view_t view;
+    int result = ipv4_decode(p->payload, p->len, &view);
+    if (result) return result;
 
     netif_t *nif = net_get_default_if();
-    if (total_len < ihl || p->len < total_len || !iph->ttl ||
-        (ntohs(iph->flags_frag) & 0xBFFF) != 0 ||
-        (dst_ip != nif->ip_addr && dst_ip != 0xFFFFFFFFU &&
-         dst_ip != (nif->ip_addr | ~nif->netmask))) {
-        return -STRATUM_EINVAL;
-    }
+    if (view.dst != nif->ip_addr && view.dst != 0xFFFFFFFFU &&
+        view.dst != (nif->ip_addr | ~nif->netmask)) return -STRATUM_EINVAL;
 
-    /* Advance payload beyond IP header */
-    uint16_t payload_len = total_len - ihl;
-    p->payload += ihl;
-    p->len = payload_len;
-
-    switch (iph->proto) {
+    p->payload += view.header_size;
+    p->len = view.payload_size;
+    switch (view.protocol) {
     case IP_PROTO_ICMP:
-        return icmp_input(p, src_ip);
+        return icmp_input(p, view.src);
     case IP_PROTO_UDP:
-        return udp_input(p, src_ip, dst_ip);
+        return udp_input(p, view.src, view.dst);
     case IP_PROTO_TCP:
-        return tcp_input(p, src_ip, dst_ip);
+        return tcp_input(p, view.src, view.dst);
     default:
         return -STRATUM_EPROTONOSUPPORT;
     }

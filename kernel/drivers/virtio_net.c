@@ -156,13 +156,15 @@ int virtio_net_transmit(virtio_net_dev_t *dev, const void *packet, size_t len) {
         if (completed != NULL) {
             break;
         }
-        __asm__ volatile("pause");
+        if (virtqueue_faulted(dev->tx_vq)) break;
+        cpu_pause();
     }
 
     if (!completed) {
         /* DMA may still be in flight. Quarantine this queue and its buffers. */
         dev->tx_failed = true;
         spin_unlock_irqrestore(&dev->tx_lock, flags);
+        if (virtqueue_faulted(dev->tx_vq)) return -STRATUM_EIO;
         kprintf("[VIRTIO-NET] Warning: TX packet timed out!\n");
         return -STRATUM_ETIMEDOUT;
     }
@@ -183,7 +185,7 @@ int virtio_net_receive(virtio_net_dev_t *dev, void *buf, size_t max_len) {
     virtio_net_rx_buf_t *rx_buf = (virtio_net_rx_buf_t *)virtqueue_get_buf(dev->rx_vq, &len);
     if (!rx_buf) {
         spin_unlock_irqrestore(&dev->rx_lock, flags);
-        return 0; /* No packet waiting */
+        return virtqueue_faulted(dev->rx_vq) ? -STRATUM_EIO : 0;
     }
 
     int pkt_len = 0;

@@ -22,6 +22,14 @@ typedef struct ip_hdr {
     uint32_t dst_ip;        /* Destination IPv4 Address */
 } __attribute__((packed)) ip_hdr_t;
 
+typedef struct {
+    uint32_t src, dst;
+    uint16_t header_size, payload_size;
+    uint8_t protocol;
+} ipv4_view_t;
+
+int ipv4_decode(const void *bytes, size_t length, ipv4_view_t *out);
+
 void ipv4_init(void);
 int  ipv4_input(pbuf_t *p);
 int  ipv4_output(pbuf_t *p, uint32_t dst_ip, uint8_t proto);

@@ -91,4 +91,5 @@ extern acpi_info_t g_acpi_info;
 int  acpi_init(const boot_handoff_t *handoff);
 void *acpi_find_table(const char *signature);
 
+int acpi_parse_madt(const void *buffer, size_t length, acpi_info_t *out);
 #endif /* STRATUM_KERNEL_ACPI_H */

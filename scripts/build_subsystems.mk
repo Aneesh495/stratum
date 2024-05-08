@@ -15,6 +15,7 @@ UEFI_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(UEFI_SRCS))
 KERNEL_CSRCS := kernel/core/string.c \
                 kernel/core/kprintf.c \
                 kernel/core/boot.c \
+                kernel/core/boot_check.c \
                 kernel/core/main.c \
                 kernel/core/syscall.c \
                 kernel/core/user_elf.c \
@@ -39,6 +40,7 @@ KERNEL_CSRCS := kernel/core/string.c \
                 kernel/drivers/uart.c \
                 kernel/drivers/fb.c \
                 kernel/drivers/acpi.c \
+                kernel/drivers/madt.c \
                 kernel/drivers/apic.c \
                 kernel/drivers/pci.c \
                 kernel/drivers/virtqueue.c \
@@ -47,12 +49,15 @@ KERNEL_CSRCS := kernel/core/string.c \
                 kernel/drivers/virtio_net.c \
                 kernel/fs/vfs.c \
                 kernel/fs/initramfs.c \
+                kernel/fs/cpio.c \
                 kernel/fs/journal.c \
                 kernel/fs/stratafs.c \
                 kernel/net/net.c \
                 kernel/net/ethernet.c \
                 kernel/net/arp.c \
                 kernel/net/ipv4.c \
+                kernel/net/ipv4_decode.c \
+                kernel/net/checksum.c \
                 kernel/net/icmp.c \
                 kernel/net/udp.c \
                 kernel/net/tcp.c \
@@ -137,7 +142,7 @@ $(BUILD_DIR)/user/init_test.o: tests/guest/init.c scripts/build_subsystems.mk
 $(BUILD_DIR)/user_init.elf: $(USER_LIB_OBJS) $(BUILD_DIR)/user/apps/sh.o $(BUILD_DIR)/user/apps/ledgerd.o $(BUILD_DIR)/user/apps/init.o user/lib/user.ld
 	$(LD_LLD) $(USER_LDFLAGS) -o $@ $(filter %.o,$^)
 
-.SECONDARY: $(BUILD_DIR)/user/exec_campaign.o $(BUILD_DIR)/user/thread_campaign.o $(BUILD_DIR)/user/ipc_campaign.o $(BUILD_DIR)/user/fs_campaign.o
+.SECONDARY: $(BUILD_DIR)/user/exec_campaign.o $(BUILD_DIR)/user/thread_campaign.o $(BUILD_DIR)/user/ipc_campaign.o $(BUILD_DIR)/user/fs_campaign.o $(BUILD_DIR)/user/net_campaign.o
 $(BUILD_DIR)/user/%_campaign.o: tests/guest/%_campaign.c scripts/build_subsystems.mk
 	@mkdir -p $(dir $@)
 	$(CLANG) $(USER_CFLAGS) -MMD -MP -c $< -o $@
@@ -174,14 +179,14 @@ $(BUILD_DIR)/stratum.elf: $(BUILD_DIR)/user_init.elf $(KERNEL_OBJS) kernel/arch/
 # Build Minimal Initramfs
 build-initramfs: $(BUILD_DIR)/initramfs.cpio
 
-$(BUILD_DIR)/initramfs.cpio: $(BUILD_DIR)/user_init.elf $(BUILD_DIR)/user_tools.elf $(BUILD_DIR)/user_exec_campaign.elf $(BUILD_DIR)/user_thread_campaign.elf $(BUILD_DIR)/user_ipc_campaign.elf $(BUILD_DIR)/user_fs_campaign.elf scripts/build_cpio.py
+$(BUILD_DIR)/initramfs.cpio: $(BUILD_DIR)/user_init.elf $(BUILD_DIR)/user_tools.elf $(BUILD_DIR)/user_exec_campaign.elf $(BUILD_DIR)/user_thread_campaign.elf $(BUILD_DIR)/user_ipc_campaign.elf $(BUILD_DIR)/user_fs_campaign.elf $(BUILD_DIR)/user_net_campaign.elf scripts/build_cpio.py
 	@mkdir -p $(BUILD_DIR)
 	@$(PYTHON) scripts/build_cpio.py $< $@ true=$(BUILD_DIR)/user_tools.elf \
 		upper=$(BUILD_DIR)/user_tools.elf exec-campaign=$(BUILD_DIR)/user_exec_campaign.elf \
 		thread-campaign=$(BUILD_DIR)/user_thread_campaign.elf ipc-campaign=$(BUILD_DIR)/user_ipc_campaign.elf \
-		fs-campaign=$(BUILD_DIR)/user_fs_campaign.elf
+		fs-campaign=$(BUILD_DIR)/user_fs_campaign.elf net-campaign=$(BUILD_DIR)/user_net_campaign.elf
 
 
 -include $(UEFI_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d) $(USER_LIB_OBJS:.o=.d) \
          $(BUILD_DIR)/user/apps/init.d $(BUILD_DIR)/user/apps/sh.d $(BUILD_DIR)/user/apps/ledgerd.d $(BUILD_DIR)/user/init_test.d
--include $(BUILD_DIR)/user/apps/tools.d $(BUILD_DIR)/user/exec_campaign.d $(BUILD_DIR)/user/thread_campaign.d $(BUILD_DIR)/user/ipc_campaign.d $(BUILD_DIR)/user/fs_campaign.d
+-include $(BUILD_DIR)/user/apps/tools.d $(BUILD_DIR)/user/exec_campaign.d $(BUILD_DIR)/user/thread_campaign.d $(BUILD_DIR)/user/ipc_campaign.d $(BUILD_DIR)/user/fs_campaign.d $(BUILD_DIR)/user/net_campaign.d

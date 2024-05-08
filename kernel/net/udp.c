@@ -1,3 +1,4 @@
+#include <kernel/spinlock.h>
 #include <kernel/udp.h>
 #include <kernel/ipv4.h>
 #include <kernel/socket.h>

@@ -2,7 +2,6 @@
 #define STRATUM_KERNEL_NET_H
 
 #include <kernel/types.h>
-#include <kernel/spinlock.h>
 
 #define PBUF_MAX_SIZE       1600
 #define ETH_ALEN            6

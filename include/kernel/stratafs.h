@@ -3,6 +3,7 @@
 
 #include <kernel/types.h>
 #include <kernel/vfs.h>
+#include <kernel/stratafs_dirent.h>
 #include <kernel/journal.h>
 #include <kernel/virtio_blk.h>
 #include <kernel/spinlock.h>
@@ -17,10 +18,6 @@
 
 #define STRATAFS_NDIR_BLOCKS        12
 #define STRATAFS_INDIR_BLOCKS       (STRATAFS_BLOCK_SIZE / sizeof(uint32_t))
-
-#define STRATAFS_FT_UNKNOWN         0
-#define STRATAFS_FT_REG             1
-#define STRATAFS_FT_DIR             2
 
 typedef struct stratafs_sb {
     uint64_t magic;
@@ -64,14 +61,6 @@ typedef struct stratafs_disk_inode {
     uint32_t generation;
     uint32_t reserved[4];
 } __attribute__((packed)) stratafs_disk_inode_t;
-
-typedef struct stratafs_disk_dirent {
-    uint32_t inode_num;
-    uint16_t record_len;
-    uint8_t  name_len;
-    uint8_t  file_type;
-    char     name[248];
-} __attribute__((packed)) stratafs_disk_dirent_t;
 
 typedef struct stratafs {
     virtio_blk_dev_t       *dev;

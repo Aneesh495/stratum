@@ -96,14 +96,17 @@ void virtqueue_destroy(virtqueue_t *vq) {
 
 int virtqueue_add_buf(virtqueue_t *vq, const vring_buf_t *bufs,
                       uint32_t num_out, uint32_t num_in, void *cookie) {
-    if (!vq || !bufs) return -STRATUM_EINVAL;
-
+    if (!vq || !bufs || !cookie || num_out > vq->queue_size ||
+        num_in > vq->queue_size - num_out || (!num_out && !num_in)) return -STRATUM_EINVAL;
     uint32_t total = num_out + num_in;
-    if (total == 0 || total > vq->queue_size) return -STRATUM_EINVAL;
 
     uint64_t flags;
     spin_lock_irqsave(&vq->lock, &flags);
 
+    if (virtqueue_faulted(vq)) {
+        spin_unlock_irqrestore(&vq->lock, flags);
+        return -STRATUM_EIO;
+    }
     if (vq->num_free < total) {
         spin_unlock_irqrestore(&vq->lock, flags);
         return -STRATUM_ENOMEM;
@@ -141,6 +144,7 @@ int virtqueue_add_buf(virtqueue_t *vq, const vring_buf_t *bufs,
     /* Memory barrier before updating index */
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     vq->avail->idx = avail_idx + 1;
+    vq->submitted++;
 
     spin_unlock_irqrestore(&vq->lock, flags);
     return 0;
@@ -165,35 +169,36 @@ void *virtqueue_get_buf(virtqueue_t *vq, uint32_t *out_len) {
     uint64_t flags;
     spin_lock_irqsave(&vq->lock, &flags);
 
-    if (vq->last_used_idx == vq->used->idx) {
+    uint16_t pending = (uint16_t)(vq->used->idx - vq->last_used_idx);
+    if (!pending || virtqueue_faulted(vq)) {
         spin_unlock_irqrestore(&vq->lock, flags);
         return NULL;
     }
+    if (pending > vq->submitted - vq->completed) goto malformed;
 
-    /* Memory barrier to ensure completed descriptor read order */
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-
+    /* The device publishes the index only after the completion entry. */
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
     uint16_t used_slot = vq->last_used_idx % vq->queue_size;
-    vring_used_elem_t *elem = &vq->used->ring[used_slot];
-    uint16_t head = (uint16_t)elem->id;
+    const volatile vring_used_elem_t *elem = &vq->used->ring[used_slot];
+    uint32_t head = elem->id;
+    uint32_t length = elem->len;
+    if (head >= vq->queue_size || !vq->cookies[head]) goto malformed;
 
-    if (out_len) {
-        *out_len = elem->len;
+    uint16_t curr = (uint16_t)head;
+    uint16_t count = 0;
+    uint64_t writable = 0;
+    for (;;) {
+        if (curr >= vq->queue_size || ++count > vq->queue_size - vq->num_free) goto malformed;
+        const vring_desc_t *desc = &vq->desc[curr];
+        if (desc->flags & VRING_DESC_F_WRITE) writable += desc->len;
+        if (!(desc->flags & VRING_DESC_F_NEXT)) break;
+        curr = desc->next;
     }
+    if (length > writable) goto malformed;
 
+    if (out_len) *out_len = length;
     void *cookie = vq->cookies[head];
     vq->cookies[head] = NULL;
-
-    /* Reclaim descriptor chain back to free list */
-    uint16_t curr = head;
-    uint16_t count = 0;
-    while (1) {
-        count++;
-        if (!(vq->desc[curr].flags & VRING_DESC_F_NEXT)) {
-            break;
-        }
-        curr = vq->desc[curr].next;
-    }
 
     /* Link freed chain to current free head */
     vq->desc[curr].next = vq->free_head;
@@ -202,12 +207,37 @@ void *virtqueue_get_buf(virtqueue_t *vq, uint32_t *out_len) {
 
     /* Advance monotonic last_used_idx (natural 16-bit wrap) */
     vq->last_used_idx++;
-
+    vq->completed++;
     spin_unlock_irqrestore(&vq->lock, flags);
     return cookie;
+
+malformed:
+    /* Preserve all device-owned buffers until reset proves DMA has stopped. */
+    __atomic_store_n(&vq->failed, true, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&vq->lock, flags);
+    return NULL;
 }
 
 bool virtqueue_has_used(virtqueue_t *vq) {
     if (!vq) return false;
     return (vq->last_used_idx != vq->used->idx);
+}
+
+bool virtqueue_faulted(virtqueue_t *vq) {
+    return __atomic_load_n(&vq->failed, __ATOMIC_ACQUIRE);
+}
+
+void virtqueue_snapshot(virtqueue_t *vq, strat_queue_stats_t *stats) {
+    uint64_t flags;
+    spin_lock_irqsave(&vq->lock, &flags);
+    *stats = (strat_queue_stats_t){
+        .submitted = vq->submitted,
+        .completed = vq->completed,
+        .capacity = vq->queue_size,
+        .free = vq->num_free,
+        .available_idx = vq->avail->idx,
+        .used_idx = vq->last_used_idx,
+        .failed = virtqueue_faulted(vq),
+    };
+    spin_unlock_irqrestore(&vq->lock, flags);
 }

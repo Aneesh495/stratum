@@ -515,17 +515,6 @@ static bool is_directory(const stratafs_disk_inode_t *inode) {
     return (inode->mode & STRATAFS_MODE_MASK) == VFS_MODE_IFDIR;
 }
 
-static bool valid_directory_entry(const stratafs_t *fs, const stratafs_disk_dirent_t *entry) {
-    if (!entry->inode_num) return true;
-    if (entry->record_len != sizeof(*entry) || entry->name_len == 0 ||
-        entry->name_len >= VFS_MAX_NAME || entry->inode_num >= fs->sb.total_inodes ||
-        (entry->file_type != STRATAFS_FT_DIR && entry->file_type != STRATAFS_FT_REG)) return false;
-    for (unsigned i = 0; i < entry->name_len; i++) {
-        if (!entry->name[i] || entry->name[i] == '/') return false;
-    }
-    return true;
-}
-
 static int find_dirent(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inode_t *dir,
                        const char *name, uint8_t *buf, uint32_t *block, uint32_t *index,
                        bool find_empty) {
@@ -544,7 +533,7 @@ static int find_dirent(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inode_t *
         stratafs_disk_dirent_t *entries = (stratafs_disk_dirent_t *)buf;
         for (uint32_t i = 0; i < STRATAFS_BLOCK_SIZE / sizeof(*entries); i++) {
             const stratafs_disk_dirent_t *de = &entries[i];
-            if (!valid_directory_entry(fs, de)) return -STRATUM_EIO;
+            if (!stratafs_valid_dirent(de, fs->sb.total_inodes)) return -STRATUM_EIO;
             if ((find_empty && de->inode_num == 0) ||
                 (!find_empty && de->inode_num != 0 && de->name_len == name_len &&
                  memcmp(de->name, name, name_len) == 0)) {
@@ -889,7 +878,7 @@ static int stratafs_vfs_readdir(vfs_node_t *node, uint64_t *index, vfs_dirent_t 
         do {
             const stratafs_disk_dirent_t *record = &entries[*index % slots];
             (*index)++;
-            if (!valid_directory_entry(fs, record)) {
+            if (!stratafs_valid_dirent(record, fs->sb.total_inodes)) {
                 res = -STRATUM_EIO;
                 break;
             }

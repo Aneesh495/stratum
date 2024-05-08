@@ -18,55 +18,6 @@ static kmem_cache_t *g_pbuf_cache = NULL;
 static netif_t       g_default_netif;
 static bool          g_net_initialized = false;
 
-uint16_t net_checksum(const void *data, size_t length) {
-    const uint16_t *words = (const uint16_t *)data;
-    uint32_t sum = 0;
-
-    while (length > 1) {
-        sum += *words++;
-        length -= 2;
-    }
-
-    if (length > 0) {
-        sum += *(const uint8_t *)words;
-    }
-
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-
-    return (uint16_t)(~sum);
-}
-
-uint16_t net_pseudo_checksum(uint32_t src_ip, uint32_t dst_ip, uint8_t proto, const void *payload, size_t length) {
-    uint32_t sum = 0;
-
-    /* Pseudo header */
-    uint32_t s = htonl(src_ip);
-    uint32_t d = htonl(dst_ip);
-    sum += (s & 0xFFFF) + (s >> 16);
-    sum += (d & 0xFFFF) + (d >> 16);
-    sum += htons((uint16_t)proto);
-    sum += htons((uint16_t)length);
-
-    /* Payload */
-    const uint16_t *words = (const uint16_t *)payload;
-    size_t rem = length;
-    while (rem > 1) {
-        sum += *words++;
-        rem -= 2;
-    }
-    if (rem > 0) {
-        sum += *(const uint8_t *)words;
-    }
-
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-
-    return (uint16_t)(~sum);
-}
-
 pbuf_t *pbuf_alloc(size_t size) {
     if (size > PBUF_MAX_SIZE) return NULL;
     if (!g_pbuf_cache) return NULL;
