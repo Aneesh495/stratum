@@ -64,6 +64,7 @@ test-mm test-smp test-sched test-abi test-faults: image
 
 test-drivers: image
 	@$(PYTHON) scripts/test_block_wrap.py
+	@$(PYTHON) scripts/test_block_errors.py
 
 test-storage: image
 	@$(PYTHON) scripts/test_diagnostics.py storage
@@ -106,7 +107,7 @@ fuzz:
 	@$(PYTHON) scripts/run_fuzz.py
 
 soak: image
-	@$(PYTHON) scripts/test_diagnostics.py stress
+	@$(PYTHON) scripts/test_soak.py
 
 bench:
 	@$(PYTHON) scripts/run_benchmarks.py

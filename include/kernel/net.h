@@ -70,6 +70,7 @@ void    pbuf_free(pbuf_t *p);
 
 /* Network Subsystem API */
 void     net_init(void);
+void     net_start_worker(void);
 netif_t *net_get_default_if(void);
 void     net_input(pbuf_t *p);
 void     net_poll(void);

@@ -9,6 +9,9 @@
 static virtio_blk_dev_t g_primary_blk;
 static bool             g_primary_blk_registered = false;
 
+static int configure_block(virtio_blk_dev_t *dev);
+static int reset_locked(virtio_blk_dev_t *dev);
+
 virtio_blk_dev_t *virtio_blk_get_primary(void) {
     return g_primary_blk_registered ? &g_primary_blk : NULL;
 }
@@ -60,25 +63,27 @@ static int64_t submit_request(virtio_blk_dev_t *dev, uint32_t type, uint64_t sec
         cpu_pause();
     }
     dev->failed = true;
-    kprintf("[VIRTIO-BLK] Device disabled after a timeout at sector %lu.\n", sector);
+    kprintf("[VIRTIO-BLK] Request timed out at sector %lu.\n", sector);
     return -STRATUM_ETIMEDOUT;
 }
 
 static int64_t virtio_blk_do_request(virtio_blk_dev_t *dev, uint32_t type,
                                      uint64_t sector, uint32_t count, void *buf) {
-    if (!dev || !dev->vq) return -STRATUM_EINVAL;
-    if (type != VIRTIO_BLK_T_FLUSH) {
-        if (!count) return 0;
-        if (!buf || sector >= dev->capacity_sectors || count > dev->capacity_sectors - sector) {
-            return -STRATUM_EINVAL;
-        }
-    }
+    if (!dev) return -STRATUM_EINVAL;
+    if (type != VIRTIO_BLK_T_FLUSH && !count) return 0;
 
     uint64_t flags;
     spin_lock_irqsave(&dev->lock, &flags);
-    if (dev->failed) {
+    int error = 0;
+    if (dev->failed || !dev->vq) error = -STRATUM_EIO;
+    else if (type == VIRTIO_BLK_T_FLUSH) {
+        if (!(dev->vdev.negotiated_features & VIRTIO_BLK_F_FLUSH)) error = -STRATUM_ENOTSUP;
+    } else if (!buf || sector >= dev->capacity_sectors || count > dev->capacity_sectors - sector) {
+        error = -STRATUM_EINVAL;
+    } else if (type == VIRTIO_BLK_T_OUT && dev->read_only) error = -STRATUM_EROFS;
+    if (error) {
         spin_unlock_irqrestore(&dev->lock, flags);
-        return -STRATUM_EIO;
+        return error;
     }
     uint64_t completed = 0;
     int64_t result;
@@ -92,6 +97,11 @@ static int64_t virtio_blk_do_request(virtio_blk_dev_t *dev, uint32_t type,
         sector += sectors;
         count -= sectors;
     } while (count);
+    if (dev->failed) {
+        /* Never replay an operation whose outcome is unknown. */
+        int reset = reset_locked(dev);
+        if (reset) kprintf("[VIRTIO-BLK] Recovery failed: %d.\n", reset);
+    }
     spin_unlock_irqrestore(&dev->lock, flags);
     return completed ? (int64_t)completed : result;
 }
@@ -101,40 +111,19 @@ int64_t virtio_blk_read(virtio_blk_dev_t *dev, uint64_t sector, uint32_t count, 
 }
 
 int64_t virtio_blk_write(virtio_blk_dev_t *dev, uint64_t sector, uint32_t count, const void *buf) {
-    if (dev && dev->read_only) return -STRATUM_EROFS;
     return virtio_blk_do_request(dev, VIRTIO_BLK_T_OUT, sector, count, (void *)buf);
 }
 
 int virtio_blk_flush(virtio_blk_dev_t *dev) {
-    if (!dev || !(dev->vdev.negotiated_features & VIRTIO_BLK_F_FLUSH)) return -STRATUM_ENOTSUP;
+    if (!dev) return -STRATUM_ENOTSUP;
     int64_t res = virtio_blk_do_request(dev, VIRTIO_BLK_T_FLUSH, 0, 0, NULL);
     return (res >= 0) ? 0 : (int)res;
 }
 
-int virtio_blk_init(void) {
-    pci_device_t *pci_dev = pci_find_device(0x1AF4, VIRTIO_BLK_PCI_MODERN_DEVICE_ID);
-    if (!pci_dev) {
-        pci_dev = pci_find_device(0x1AF4, VIRTIO_BLK_PCI_LEGACY_DEVICE_ID);
-    }
-
-    if (!pci_dev) {
-        kprintf("[VIRTIO-BLK] No Virtio-blk PCI device detected.\n");
-        return -STRATUM_ENODEV;
-    }
-
-    virtio_blk_dev_t *dev = &g_primary_blk;
-    memset(dev, 0, sizeof(virtio_blk_dev_t));
-    spin_lock_init(&dev->lock);
-
-    int res = virtio_probe_device(pci_dev, &dev->vdev);
-    if (res != 0) {
-        kprintf("[VIRTIO-BLK] Failed to probe virtio device: %d\n", res);
-        return res;
-    }
-
+static int configure_block(virtio_blk_dev_t *dev) {
     /* Negotiate supported features */
     uint64_t features = VIRTIO_BLK_F_BLK_SIZE | VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_RO;
-    res = virtio_negotiate_features(&dev->vdev, features);
+    int res = virtio_negotiate_features(&dev->vdev, features);
     if (res != 0) return res;
 
     /* Setup request virtqueue (queue index 0) */
@@ -160,6 +149,51 @@ int virtio_blk_init(void) {
 
     /* Mark driver as operational */
     virtio_driver_ok(&dev->vdev);
+    return 0;
+}
+
+static int reset_locked(virtio_blk_dev_t *dev) {
+    dev->failed = true;
+    int res = virtio_reset_device(&dev->vdev);
+    if (res) return res;
+    dev->vq = NULL;
+    res = configure_block(dev);
+    if (!res) dev->failed = false;
+    return res;
+}
+
+int virtio_blk_reset(virtio_blk_dev_t *dev) {
+    if (!dev) return -STRATUM_EINVAL;
+    uint64_t flags;
+    spin_lock_irqsave(&dev->lock, &flags);
+    int res = reset_locked(dev);
+    spin_unlock_irqrestore(&dev->lock, flags);
+    return res;
+}
+
+int virtio_blk_init(void) {
+    pci_device_t *pci_dev = pci_find_device(0x1AF4, VIRTIO_BLK_PCI_MODERN_DEVICE_ID);
+    if (!pci_dev) {
+        pci_dev = pci_find_device(0x1AF4, VIRTIO_BLK_PCI_LEGACY_DEVICE_ID);
+    }
+
+    if (!pci_dev) {
+        kprintf("[VIRTIO-BLK] No Virtio-blk PCI device detected.\n");
+        return -STRATUM_ENODEV;
+    }
+
+    virtio_blk_dev_t *dev = &g_primary_blk;
+    memset(dev, 0, sizeof(virtio_blk_dev_t));
+    spin_lock_init(&dev->lock);
+
+    int res = virtio_probe_device(pci_dev, &dev->vdev);
+    if (res != 0) {
+        kprintf("[VIRTIO-BLK] Failed to probe virtio device: %d\n", res);
+        return res;
+    }
+
+    res = configure_block(dev);
+    if (res) return res;
     g_primary_blk_registered = true;
 
     kprintf("[VIRTIO-BLK] Block device initialized: capacity=%lu sectors (%lu MiB, block_size=%u, ro=%u)\n",

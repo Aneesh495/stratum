@@ -95,6 +95,8 @@ def check_reply(data, expected):
 def run(count, logs):
     logs.mkdir(parents=True, exist_ok=True)
     capture = logs / "ethernet.pcap"
+    kernel = Path("build/stratum.elf")
+    kernel_hash, boot_hash = file_hash(kernel), file_hash(BOOT_IMAGE)
     elapsed = time.monotonic()
     payloads = sha256()
     with socket.socket() as listener:
@@ -130,10 +132,12 @@ def run(count, logs):
             raise RuntimeError(f"{name!r}: ring capacity or completion mismatch")
         if count == REQUIRED and (int(avail), int(used)) != (2, 2):
             raise RuntimeError(f"{name!r}: expected two wraps of each index")
+    if (file_hash(kernel), file_hash(BOOT_IMAGE)) != (kernel_hash, boot_hash):
+        raise RuntimeError("kernel or boot image changed during the campaign")
     report = {
         "datagrams_per_direction": count, "payload_sha256": payloads.hexdigest(),
-        "pcap_sha256": file_hash(capture), "kernel_sha256": file_hash(Path("build/stratum.elf")),
-        "boot_image_sha256": file_hash(BOOT_IMAGE), "seconds": round(time.monotonic() - elapsed, 3),
+        "pcap_sha256": file_hash(capture), "kernel_sha256": kernel_hash,
+        "boot_image_sha256": boot_hash, "seconds": round(time.monotonic() - elapsed, 3),
         "queues": [[row[0].decode(), *map(int, row[1:])] for row in stats],
     }
     (logs / "results.json").write_text(json.dumps(report, indent=2) + "\n")

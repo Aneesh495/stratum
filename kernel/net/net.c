@@ -1,4 +1,5 @@
 #include <kernel/net.h>
+#include <kernel/sched.h>
 #include <kernel/event.h>
 #include <kernel/boot.h>
 #include <kernel/ethernet.h>
@@ -102,6 +103,21 @@ void net_poll(void) {
         processed = true;
     }
     if (processed) readiness_notify();
+}
+
+static void net_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        net_poll();
+        thread_sleep_ms(1);
+    }
+}
+
+void net_start_worker(void) {
+    if (g_default_netif.driver_priv &&
+        !thread_create_on_cpu("net-rx", net_worker, NULL, THREAD_PRIO_HIGH, 0)) {
+        kprintf("[NET] Failed to start the receive worker.\n");
+    }
 }
 
 static uint32_t boot_ip(void) {

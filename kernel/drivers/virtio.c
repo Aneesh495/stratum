@@ -94,16 +94,29 @@ int virtio_probe_device(pci_device_t *pci_dev, virtio_device_t *vdev) {
         return -STRATUM_ENODEV;
     }
 
-    /* 1. Reset device */
+    return virtio_reset_device(vdev);
+}
+
+int virtio_reset_device(virtio_device_t *vdev) {
+    if (!vdev) return -STRATUM_EINVAL;
+
     virtio_set_status(vdev, VIRTIO_STATUS_RESET);
+    unsigned attempts = 1000000;
+    while (virtio_get_status(vdev) != VIRTIO_STATUS_RESET) {
+        if (!--attempts) return -STRATUM_ETIMEDOUT;
+        cpu_pause();
+    }
 
-    /* 2. Acknowledge device */
+    /* A zero status confirms the device has stopped touching the old queues. */
+    for (unsigned i = 0; i < VIRTIO_MAX_QUEUES; i++) {
+        virtqueue_destroy(vdev->queues[i]);
+        vdev->queues[i] = NULL;
+    }
+    vdev->num_queues = 0;
+    vdev->device_features = 0;
+    vdev->negotiated_features = 0;
     virtio_set_status(vdev, VIRTIO_STATUS_ACKNOWLEDGE);
-
-    /* 3. Driver status */
-    uint8_t s = virtio_get_status(vdev);
-    virtio_set_status(vdev, s | VIRTIO_STATUS_DRIVER);
-
+    virtio_set_status(vdev, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
     return 0;
 }
 

@@ -94,6 +94,10 @@ static _Noreturn void start_system(void) {
         extern void block_wrap_test(void);
         block_wrap_test();
     }
+    if (strcmp(g_boot_handoff.cmdline, "driver=blk-errors\n") == 0) {
+        extern void block_error_test(void);
+        block_error_test();
+    }
     virtio_net_init();
     vfs_init();
     int archive_result = initramfs_mount_bin(&g_boot_handoff);
@@ -104,17 +108,14 @@ static _Noreturn void start_system(void) {
         kprintf("[KERNEL] Root mount failed (%d). Starting shell without storage.\n", mount_result);
     }
     net_init();
+    net_start_worker();
     journal_test_configure(g_boot_handoff.cmdline);
 
     static user_program_t init;
     kassert(user_elf_load(g_user_init_binary, g_user_init_binary_len, &init) == 0);
     kassert(process_create_init(&init) != NULL);
 
-    /* Poll device RX on the bootstrap CPU until interrupt-driven I/O is available. */
-    while (1) {
-        net_poll();
-        hlt();
-    }
+    for (;;) hlt();
 }
 
 static volatile uint32_t g_thread_test_counter = 0;

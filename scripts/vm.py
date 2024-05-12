@@ -31,7 +31,7 @@ def firmware():
     )
 
 
-def command(boot, data=None, *, cpus=4, memory="256M", ovmf=None, host_port=None, ethernet=None, mac=None, capture=None):
+def command(boot, data=None, *, cpus=4, memory="256M", ovmf=None, host_port=None, ethernet=None, mac=None, capture=None, block_debug=None):
     cmd = [
         os.environ.get("QEMU") or tool("qemu-system-x86_64"),
         "-machine", "q35,accel=tcg", "-cpu", "qemu64,+nx,+apic",
@@ -42,8 +42,9 @@ def command(boot, data=None, *, cpus=4, memory="256M", ovmf=None, host_port=None
         "-display", "none", "-monitor", "none", "-no-reboot",
     ]
     if data is not None:
+        backing = f"blkdebug:{block_debug}:{data}" if block_debug else data
         cmd += [
-            "-drive", f"file={data},if=none,id=datadisk,format=raw",
+            "-drive", f"file={backing},if=none,id=datadisk,format=raw",
             "-device", "virtio-blk-pci,drive=datadisk,disable-legacy=on",
         ]
     netdev = "user,id=net0,restrict=on"

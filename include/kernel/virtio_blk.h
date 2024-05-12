@@ -53,6 +53,7 @@ int               virtio_blk_init(void);
 virtio_blk_dev_t *virtio_blk_get_primary(void);
 int64_t           virtio_blk_read(virtio_blk_dev_t *dev, uint64_t sector, uint32_t count, void *buf);
 int64_t           virtio_blk_write(virtio_blk_dev_t *dev, uint64_t sector, uint32_t count, const void *buf);
+int               virtio_blk_reset(virtio_blk_dev_t *dev);
 int               virtio_blk_flush(virtio_blk_dev_t *dev);
 
 #endif /* STRATUM_KERNEL_VIRTIO_BLK_H */

@@ -85,6 +85,7 @@ typedef struct virtio_device {
 } virtio_device_t;
 
 int          virtio_probe_device(pci_device_t *pci_dev, virtio_device_t *vdev);
+int          virtio_reset_device(virtio_device_t *vdev);
 int          virtio_negotiate_features(virtio_device_t *vdev, uint64_t required_features);
 virtqueue_t *virtio_setup_queue(virtio_device_t *vdev, uint16_t queue_idx);
 void         virtio_set_status(virtio_device_t *vdev, uint8_t status);
