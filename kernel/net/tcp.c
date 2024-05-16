@@ -8,8 +8,8 @@
 #include <shared/errno.h>
 #include <shared/syscall_nums.h>
 
-#define TCP_PCB_LIMIT 64
-#define TCP_BACKLOG_LIMIT 8
+#define TCP_PCB_LIMIT 128
+#define TCP_BACKLOG_LIMIT 32
 #define TCP_RETRY_MS 250
 #define TCP_RETRY_LIMIT 6
 

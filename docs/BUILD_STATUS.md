@@ -12,7 +12,7 @@ The current verification baseline covers the normal QEMU image and an opt-in dia
 | A06 | 150,000 real virtio-blk reads and two full block-queue wraps, and two full wraps of each virtio-net queue over an independent Ethernet link, 500 block-queue saturations, 500 real PCI resets, and 1,000 backend I/O errors | Cold-device workload and network-driver error and timeout recovery |
 | A07 | 128,006 mixed operations, 5,000 modeled crashes, 1,500 corrupt model states, 100 guest stops across ten WAL stages, and independent namespace traversal | Directory deletion and rename, links, open-unlinked lifetimes, block cache pressure and fault injection |
 | A08 | 150,000 verified UDP echoes over Ethernet, guest TCP data transfer including a retransmitted reply, and a separate host-client path | Bulk TCP transfers, broader impairment sessions, and malformed traffic campaign |
-| A09 | Native TCP service, durable acknowledgment, duplicate/conflict handling, and a record transferred to a second guest and read after reboot | Concurrent clients, automatic replication, workload counts, and repeated interruption |
+| A09 | 32 live native TCP sessions, 2,000 verified requests, 200 records automatically replicated and checked on both disks, and recovery after an active VM interruption | Full request and recovery counts, checkpoint replacement, and source-bound evidence |
 | A10 | Five bounded guest stress cycles and a 189-round mixed workload probe on 8 vCPUs and 1 GiB | Full 60-minute mixed workload and final evidence binding |
 | A11 | 2.1 million standalone parser-model mutations, a sanitizer probe of six production parsers, and independent wait/TLB exploration with negative controls | Full production-target fuzzing duration and source-bound evidence |
 | A12 | Source-bound regression bundle, 14 verifier mutation controls, and two isolated artifact builds | Complete fixed-gate evidence, full verifier corpus, and release publication |
@@ -28,3 +28,5 @@ Run the wire campaign with `make test-net-wrap`. Run the 10-minute production pa
 `make test-drivers` also verifies block-queue saturation, device reset, and backend I/O errors. The block driver waits for reset acknowledgment before freeing old DMA queues. It returns the original error to the caller and never automatically repeats a timed-out write. [Virtio device reset contract](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html) · [QEMU block error injection](https://www.qemu.org/docs/master/devel/testing/blkdebug.html)
 
 `make soak` runs the mixed workload for at least an hour. It uses 8 vCPUs and 1 GiB in one VM and preserves per-round resource checks, serial logs, a packet capture, and the final filesystem check.
+
+`make test-service` exercises 32 native clients and synchronous replication over an isolated Ethernet link. It checks both disks independently and restarts the primary ten times while the clients are active.

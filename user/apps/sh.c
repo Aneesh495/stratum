@@ -4,7 +4,7 @@
 
 extern void u_printf(const char *fmt, ...);
 extern void u_dprintf(int fd, const char *fmt, ...);
-extern int ledgerd_run(void);
+extern int ledgerd_run(const char *peer);
 extern int ledger_put(const char *id, const char *value);
 extern int ledger_pull(const char *peer, const char *id);
 extern size_t strlen(const char *s);
@@ -25,7 +25,7 @@ static void cmd_help(void) {
     u_printf("  stat <path>         Display file metadata and size\n");
     u_printf("  ledgerput <id> <value>  Store a local durable record\n");
     u_printf("  ledgerpull <ip> <id>    Fetch and store a peer record\n");
-    u_printf("  ledgerd             Serve durable records over TCP\n");
+    u_printf("  ledgerd [peer-ip]   Serve durable records and optionally replicate appends\n");
     u_printf("  sysinfo             Display kernel memory, CPUs, and uptime\n");
 }
 
@@ -198,7 +198,8 @@ static int sh_builtin(int argc, char **argv) {
         else u_printf("Ledger operation failed (err=%d)\n", res);
         return res;
     } else if (strcmp(argv[0], "ledgerd") == 0) {
-        int res = ledgerd_run();
+        if (argc > 2) return -STRATUM_EINVAL;
+        int res = ledgerd_run(argc == 2 ? argv[1] : NULL);
         if (res < 0) u_printf("ledgerd: failed (err=%d)\n", res);
         return res;
     } else if (strcmp(argv[0], "write") == 0) {
