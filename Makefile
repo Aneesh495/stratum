@@ -19,7 +19,7 @@ BOOT_DISK := $(BUILD_DIR)/images/stratum-boot.img
 DATA_DISK := $(BUILD_DIR)/images/stratum-data.img
 
 .PHONY: all bootstrap doctor build image run debug test smoke test-boot test-mm test-smp \
-        test-sched test-abi test-drivers test-storage test-storage-crash test-net test-net-wrap test-service test-faults fuzz fuzz-production soak bench \
+        test-sched test-abi test-drivers test-storage test-storage-crash test-net test-net-wrap test-tcp-campaign test-net-reject test-service test-faults fuzz fuzz-production soak bench \
         docs scope-check demo evidence acceptance verify release clean
 
 all: image
@@ -99,6 +99,12 @@ test-net demo: image
 
 test-net-wrap: image
 	@$(PYTHON) scripts/test_net_wrap.py
+
+test-tcp-campaign: image
+	@$(PYTHON) scripts/test_tcp_campaign.py
+
+test-net-reject: image
+	@$(PYTHON) scripts/test_net_reject.py
 
 test-service: image
 	@$(PYTHON) scripts/test_ledger_load.py

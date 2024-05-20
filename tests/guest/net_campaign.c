@@ -26,7 +26,7 @@ static unsigned limit(const char *value) {
     return *value ? 0 : total;
 }
 
-static int campaign(unsigned count) {
+static int campaign(unsigned count, unsigned invalid) {
     int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (fd < 0 || address(fd, false) || address(fd, true)) return 1;
 
@@ -54,22 +54,24 @@ static int campaign(unsigned count) {
     if (close(fd) || strat_net_queues(after)) return 7;
     for (unsigned i = 0; i < 2; i++) {
         const strat_queue_stats_t *a = &after[i], *b = &before[i];
-        if (a->failed || a->submitted - b->submitted != count || a->completed - b->completed != count ||
+        unsigned expected = i ? count : count + invalid;
+        if (a->failed || a->submitted - b->submitted != expected || a->completed - b->completed != expected ||
             a->available_idx != (uint16_t)a->submitted || a->used_idx != (uint16_t)a->completed ||
             a->free != b->free || a->capacity != b->capacity) return 8;
         uint64_t available_wraps = (a->submitted >> 16) - (b->submitted >> 16);
         uint64_t used_wraps = (a->completed >> 16) - (b->completed >> 16);
         u_printf("[QUEUE] %s submitted=%u completed=%u available_wraps=%lu used_wraps=%lu free=%u capacity=%u\n",
-                 i ? "tx" : "rx", count, count, available_wraps, used_wraps, a->free, a->capacity);
+                 i ? "tx" : "rx", expected, expected, available_wraps, used_wraps, a->free, a->capacity);
     }
     u_printf("[PASS] UDP echoes=%u exact payloads\n", count);
     return 0;
 }
 
 int main(int argc, char **argv) {
-    unsigned count = argc == 2 ? limit(argv[1]) : 0;
-    if (!count) return 1;
-    int result = campaign(count);
+    unsigned count = argc == 2 || argc == 3 ? limit(argv[1]) : 0;
+    unsigned invalid = argc == 3 ? limit(argv[2]) : 0;
+    if (!count || (argc == 3 && !invalid) || invalid > 10000 || count + invalid > NETWORK_LIMIT) return 1;
+    int result = campaign(count, invalid);
     if (result) u_printf("net-campaign: failure=%d\n", result);
     return result;
 }
