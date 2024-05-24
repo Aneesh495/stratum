@@ -79,3 +79,10 @@ Readiness changes in IPC, serial input, and the network stack wake
 waiters to rescan. Deadlines and notifications use the same scheduler
 wait mechanism. Console input falls back to timed checks when the I/O
 APIC cannot route the serial interrupt.
+
+Anonymous memory supports `MAP_PRIVATE` and `MAP_SHARED`. Private mappings
+fault in zeroed pages and become copy-on-write across `fork`. Shared mappings
+reserve zeroed pages at creation and retain the same frames across `fork`,
+including pages the parent has yet to touch. `mprotect` applies to the
+caller's address space. Each mapping retains its frame references until
+unmap, exec, or exit. Futex keys belong to one address space.

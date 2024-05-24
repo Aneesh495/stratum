@@ -15,6 +15,7 @@
 #define PTE_HUGE      (1ULL << 7)
 #define PTE_GLOBAL    (1ULL << 8)
 #define PTE_COW       (1ULL << 9)   /* Software Copy-On-Write bit */
+#define PTE_SHARED    (1ULL << 10)  /* Shared user page, exempt from COW */
 #define PTE_NX        (1ULL << 63)
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
 #define PTE_FLAGS_MASK (0x0000000000000FFFULL | PTE_NX)

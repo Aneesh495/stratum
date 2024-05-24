@@ -25,7 +25,29 @@ static user_region_t *find_region(process_t *process, uint64_t address) {
     return NULL;
 }
 
-int64_t user_map_anonymous(process_t *process, uint64_t length, unsigned protection) {
+static int populate_shared(process_t *process, uint64_t start, uint64_t length, unsigned protection) {
+    uint64_t flags = PTE_USER | PTE_NX | PTE_SHARED;
+    if (protection & PROT_WRITE) flags |= PTE_WRITABLE;
+    uint64_t next = start;
+    for (; next < start + length; next += PAGE_SIZE) {
+        uint64_t phys = pmm_alloc_page();
+        if (!phys) break;
+        if (vmm_map_page(process->address_space, next, phys, flags) != 0) {
+            pmm_page_release(phys);
+            break;
+        }
+    }
+    if (next == start + length) return 0;
+    while (next > start) {
+        next -= PAGE_SIZE;
+        uint64_t phys;
+        if (vmm_get_mapping(process->address_space, next, &phys, NULL) == 0 &&
+            vmm_unmap_page(process->address_space, next) == 0) pmm_page_release(phys);
+    }
+    return -STRATUM_ENOMEM;
+}
+
+int64_t user_map_anonymous(process_t *process, uint64_t length, unsigned protection, bool shared) {
     if (!process) return -STRATUM_ESRCH;
     length = page_length(length);
     if (!length || !valid_protection(protection)) return -STRATUM_EINVAL;
@@ -50,7 +72,13 @@ int64_t user_map_anonymous(process_t *process, uint64_t length, unsigned protect
             }
         }
         if (next == candidate) {
-            *free_slot = (user_region_t){ .start = candidate, .length = length, .protection = protection };
+            if (shared) {
+                int result = populate_shared(process, candidate, length, protection);
+                if (result) return result;
+            }
+            *free_slot = (user_region_t){
+                .start = candidate, .length = length, .protection = protection, .shared = shared,
+            };
             return (int64_t)candidate;
         }
         candidate = next;
@@ -85,7 +113,11 @@ int user_protect(process_t *process, uint64_t start, uint64_t length, unsigned p
         uint64_t phys;
         if (vmm_get_mapping(process->address_space, va, &phys, NULL) != 0) continue;
         uint64_t flags = PTE_USER | PTE_NX;
-        if (protection & PROT_WRITE) flags |= pmm_page_refcount(phys) > 1 ? PTE_COW : PTE_WRITABLE;
+        if (region->shared) flags |= PTE_SHARED;
+        if (protection & PROT_WRITE) {
+            bool cow = !region->shared && pmm_page_refcount(phys) > 1;
+            flags |= cow ? PTE_COW : PTE_WRITABLE;
+        }
         if (vmm_map_page(process->address_space, va, phys, flags) != 0) return -STRATUM_EIO;
     }
     region->protection = protection;
@@ -95,7 +127,7 @@ int user_protect(process_t *process, uint64_t start, uint64_t length, unsigned p
 bool user_demand_page(process_t *process, uint64_t address, bool write, bool execute) {
     if (!process || execute) return false;
     user_region_t *region = find_region(process, address);
-    if (!region || (write && !(region->protection & PROT_WRITE))) return false;
+    if (!region || region->shared || (write && !(region->protection & PROT_WRITE))) return false;
     uint64_t phys = pmm_alloc_page();
     if (!phys) return false;
     uint64_t flags = PTE_USER | PTE_NX;

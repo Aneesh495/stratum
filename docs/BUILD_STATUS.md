@@ -5,13 +5,13 @@ The current verification baseline covers the normal QEMU image and an opt-in dia
 | Gate | Exercised in regression | Still required |
 | --- | --- | --- |
 | A01 | 45 fresh boots with per-CPU work, 17 malformed EFI images, 111 debugger-injected handoff mutations, and entry register inspection | Release evidence binding |
-| A02 | 2 million host model operations, 51,200 reconciled guest demand-zero allocations, fork/COW protection, and 10,000 shared kernel mapping replacements on each of 4 and 8 CPUs | Shared user mappings, broader failure injection and ownership checks |
+| A02 | 2 million host model operations, 51,200 reconciled guest demand-zero allocations, fork/COW protection, 10,000 shared kernel mapping replacements, and 2,000 inherited shared and private COW cases on each of 4 and 8 CPUs | Broader allocation failure injection and final evidence binding |
 | A03 | 512 simultaneous user workers across 32 processes, over 1 million runnable user switches, and 10,000 futex cases on each of 4 and 8 CPUs | Broader fairness and process-wide cancellation checks |
 | A04 | Ring 3 entry, 10,000 fork/exec/wait cycles, 25,000 thread joins with TLS and SSE state, and 10,000 boundary calls on each of 4 and 8 CPUs | Process-wide cancellation and broader boundary and reaping checks |
 | A05 | 100,000 verified pipe and channel transfers, 25,000 readiness races, backpressure, EOF, and descriptor generation checks on each of 4 and 8 CPUs | Process-wide cancellation and broader socket readiness races |
 | A06 | 150,000 real virtio-blk reads and two full block-queue wraps, and two full wraps of each virtio-net queue over an independent Ethernet link, 500 block-queue saturations, 500 real PCI resets, and 1,000 backend I/O errors | Cold-device workload and network-driver error and timeout recovery |
 | A07 | 128,006 mixed operations, 5,000 modeled crashes, 1,500 corrupt model states, 100 guest stops across ten WAL stages, and independent namespace traversal | Directory deletion and rename, links, open-unlinked lifetimes, block cache pressure and fault injection |
-| A08 | 150,000 verified UDP echoes over Ethernet, guest TCP data transfer including a retransmitted reply, and a separate host-client path | Full TCP and invalid-input campaign results and final source binding |
+| A08 | 150,000 verified UDP echoes over Ethernet, 10,000 rejected frames interleaved with 2,000 exact replies, guest TCP transfer with retransmission, and a host-client path | Full TCP workload and final source binding |
 | A09 | 32 live native TCP sessions, 100,000 verified requests, 10,000 records checked on both disks, and ten primary interruptions with recovery at `935682e` | Checkpoint replacement and final source binding |
 | A10 | Five bounded guest stress cycles and a 189-round mixed workload probe on 8 vCPUs and 1 GiB | Full 60-minute mixed workload and final evidence binding |
 | A11 | 2.1 million standalone parser-model mutations, a sanitizer probe of six production parsers, and independent wait/TLB exploration with negative controls | Full production-target fuzzing duration and source-bound evidence |

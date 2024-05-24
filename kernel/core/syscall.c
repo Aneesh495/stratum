@@ -498,10 +498,14 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
         if (regs->rdi >= smp_get_online_cpus()) return -STRATUM_EINVAL;
         return (int64_t)__atomic_load_n(&g_runqueues[regs->rdi].user_switches, __ATOMIC_RELAXED);
 
-    case SYS_mmap:
-        if (regs->rdi || regs->r10 != (MAP_PRIVATE | MAP_ANONYMOUS) ||
-            regs->r8 != (uint64_t)-1 || regs->r9) return -STRATUM_EINVAL;
-        return user_map_anonymous(process_get_current(), regs->rsi, (unsigned)regs->rdx);
+    case SYS_mmap: {
+        bool shared = regs->r10 == (MAP_SHARED | MAP_ANONYMOUS);
+        if (regs->rdi || (!shared && regs->r10 != (MAP_PRIVATE | MAP_ANONYMOUS)) ||
+            regs->r8 != (uint64_t)-1 || regs->r9 || regs->rdx > (PROT_READ | PROT_WRITE)) {
+            return -STRATUM_EINVAL;
+        }
+        return user_map_anonymous(process_get_current(), regs->rsi, (unsigned)regs->rdx, shared);
+    }
 
     case SYS_munmap:
         return user_unmap(process_get_current(), regs->rdi, regs->rsi);

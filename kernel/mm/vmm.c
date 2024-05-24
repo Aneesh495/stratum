@@ -163,8 +163,8 @@ pml4_t *vmm_clone_address_space(pml4_t *src) {
                     uint64_t paddr = pte & PTE_ADDR_MASK;
                     uint64_t flags = pte & PTE_FLAGS_MASK;
 
-                    /* If page is writable, convert to COW (read-only + PTE_COW) */
-                    if (flags & PTE_WRITABLE) {
+                    /* Private writable mappings become copy-on-write. */
+                    if ((flags & PTE_WRITABLE) && !(flags & PTE_SHARED)) {
                         flags &= ~PTE_WRITABLE;
                         flags |= PTE_COW;
                         src_pt->entries[pt_i] = paddr | flags;

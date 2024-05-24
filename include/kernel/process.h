@@ -29,6 +29,7 @@ typedef struct user_region {
     uint64_t start;
     uint64_t length;
     unsigned protection;
+    bool shared;
 } user_region_t;
 
 typedef struct {
@@ -76,7 +77,7 @@ uint32_t   process_thread_self(void);
 bool       process_can_replace_image(const process_t *proc);
 int32_t    process_waitpid(int32_t pid, int *status, int options);
 
-int64_t    user_map_anonymous(process_t *process, uint64_t length, unsigned protection);
+int64_t    user_map_anonymous(process_t *process, uint64_t length, unsigned protection, bool shared);
 int        user_unmap(process_t *process, uint64_t start, uint64_t length);
 int        user_protect(process_t *process, uint64_t start, uint64_t length, unsigned protection);
 bool       user_demand_page(process_t *process, uint64_t address, bool write, bool execute);
