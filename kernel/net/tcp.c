@@ -224,9 +224,12 @@ int64_t tcp_recv(tcp_pcb_t *pcb, void *buf, size_t len) {
             ((uint8_t *)buf)[i] = pcb->rx_buf[pcb->rx_tail];
             pcb->rx_tail = (pcb->rx_tail + 1) % TCP_RING_BUF_SIZE;
         }
-        bool reopen = pcb->rx_count == TCP_RING_BUF_SIZE;
+        uint32_t previous_window = TCP_RING_BUF_SIZE - pcb->rx_count;
         pcb->rx_count -= (uint32_t)count;
-        if (reopen) output(pcb, pcb->snd_nxt, TCP_FLAG_ACK, NULL, 0);
+        /* Peers may wait for one full segment of space before sending again. */
+        if (previous_window < TCP_DEFAULT_MSS && previous_window + count >= TCP_DEFAULT_MSS) {
+            output(pcb, pcb->snd_nxt, TCP_FLAG_ACK, NULL, 0);
+        }
         res = (int64_t)count;
     }
     spin_unlock_irqrestore(&tcp_lock, flags);
