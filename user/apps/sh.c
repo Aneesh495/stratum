@@ -21,6 +21,7 @@ static void cmd_help(void) {
     u_printf("  mv <from> <to>      Rename or replace a regular file\n");
     u_printf("  mkdir <path>        Create a directory in the filesystem\n");
     u_printf("  rm <path>           Unlink / delete a file\n");
+    u_printf("  rmdir <path>        Remove an empty directory\n");
     u_printf("  write <path> <text> Append text and sync it to disk\n");
     u_printf("  stat <path>         Display file metadata and size\n");
     u_printf("  ledgerput <id> <value>  Store a local durable record\n");
@@ -189,6 +190,10 @@ static int sh_builtin(int argc, char **argv) {
         cmd_mkdir(argc > 1 ? argv[1] : NULL);
     } else if (strcmp(argv[0], "rm") == 0) {
         cmd_rm(argc > 1 ? argv[1] : NULL);
+    } else if (strcmp(argv[0], "rmdir") == 0) {
+        int result = argc == 2 ? rmdir(argv[1]) : -STRATUM_EINVAL;
+        if (result) u_printf("rmdir: failed (err=%d)\n", result);
+        return result;
     } else if (strcmp(argv[0], "sysinfo") == 0) {
         cmd_sysinfo();
     } else if ((strcmp(argv[0], "ledgerput") == 0 || strcmp(argv[0], "ledgerpull") == 0) && argc == 3) {

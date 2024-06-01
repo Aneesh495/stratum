@@ -6,6 +6,7 @@
 /* File Mode Bits */
 #define VFS_MODE_IFMT       0xF000
 #define VFS_MODE_IFREG      0x8000
+#define VFS_MODE_IFLNK      0xA000
 #define VFS_MODE_IFDIR      0x4000
 #define VFS_MODE_IFCHR      0x2000
 #define VFS_MODE_IFBLK      0x6000

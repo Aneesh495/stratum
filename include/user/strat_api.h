@@ -193,6 +193,22 @@ static inline int unlink(const char *path) {
     return (int)syscall1(SYS_unlink, (uint64_t)path);
 }
 
+static inline int link(const char *source, const char *target) {
+    return (int)syscall2(SYS_link, (uintptr_t)source, (uintptr_t)target);
+}
+
+static inline int symlink(const char *target, const char *name) {
+    return (int)syscall2(SYS_symlink, (uintptr_t)target, (uintptr_t)name);
+}
+
+static inline int64_t readlink(const char *path, char *out, size_t size) {
+    return syscall3(SYS_readlink, (uintptr_t)path, (uintptr_t)out, size);
+}
+
+static inline int rmdir(const char *path) {
+    return (int)syscall1(SYS_rmdir, (uintptr_t)path);
+}
+
 static inline int fsync(int fd) {
     return (int)syscall1(SYS_fsync, (uint64_t)fd);
 }

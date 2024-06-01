@@ -8,6 +8,7 @@
 #define STRATAFS_MAX_FILE_SIZE ((STRATAFS_NDIR_BLOCKS + STRATAFS_INDIR_BLOCKS) * STRATAFS_BLOCK_SIZE)
 #define STRATAFS_MAX_BITMAP_BITS (STRATAFS_BLOCK_SIZE * 8U)
 #define STRATAFS_MODE_MASK 0170000
+#define STRATAFS_INODE_ORPHAN 1U
 
 _Static_assert(sizeof(stratafs_sb_t) == STRATAFS_BLOCK_SIZE, "StrataFS superblock layout");
 _Static_assert(sizeof(stratafs_disk_inode_t) == STRATAFS_INODE_SIZE, "StrataFS inode stride");
@@ -515,6 +516,15 @@ static bool is_directory(const stratafs_disk_inode_t *inode) {
     return (inode->mode & STRATAFS_MODE_MASK) == VFS_MODE_IFDIR;
 }
 
+static uint8_t disk_type(const stratafs_disk_inode_t *inode) {
+    switch (inode->mode & STRATAFS_MODE_MASK) {
+        case VFS_MODE_IFDIR: return STRATAFS_FT_DIR;
+        case VFS_MODE_IFREG: return STRATAFS_FT_REG;
+        case VFS_MODE_IFLNK: return STRATAFS_FT_SYMLINK;
+        default: return STRATAFS_FT_UNKNOWN;
+    }
+}
+
 static int find_dirent(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inode_t *dir,
                        const char *name, uint8_t *buf, uint32_t *block, uint32_t *index,
                        bool find_empty) {
@@ -679,7 +689,8 @@ static int stratafs_vfs_lookup(vfs_node_t *parent, const char *name, vfs_node_t 
     return res;
 }
 
-static int create_entry(vfs_node_t *parent, const char *name, uint16_t mode, vfs_node_t **out_child) {
+static int create_entry(vfs_node_t *parent, const char *name, uint16_t mode,
+                        const char *target, vfs_node_t **out_child) {
     stratafs_t *fs = parent->mount->fs_priv;
     uint64_t flags;
     spin_lock_irqsave(&fs->lock, &flags);
@@ -723,26 +734,55 @@ static int create_entry(vfs_node_t *parent, const char *name, uint16_t mode, vfs
         if (res != 0) goto out;
     }
 
-    res = stratafs_dir_add(fs, tx, (uint32_t)parent->inode_num, &dir, name, ino,
-                          is_directory(&inode) ? STRATAFS_FT_DIR : STRATAFS_FT_REG);
-    if (res == 0) {
+    if (target) {
+        size_t length = strlen(target);
+        if (!length || length >= VFS_MAX_PATH || target[0] != '/') {
+            res = -STRATUM_EINVAL;
+            goto out;
+        }
+        int64_t wrote = stratafs_write_file(fs, tx, ino, &inode, 0, target, length);
+        if (wrote != (int64_t)length) {
+            res = wrote < 0 ? (int)wrote : -STRATUM_EIO;
+            goto out;
+        }
+    }
+    res = stratafs_dir_add(fs, tx, (uint32_t)parent->inode_num, &dir, name, ino, disk_type(&inode));
+    if (res == 0 && out_child) {
         child = stratafs_create_vfs_node(fs, ino, &inode, name);
         if (!child) res = -STRATUM_ENOMEM;
     }
 out:
     res = finish_tx(fs, tx, res);
     spin_unlock_irqrestore(&fs->lock, flags);
-    if (res == 0) *out_child = child;
+    if (res == 0 && out_child) *out_child = child;
     else vfs_node_release(child);
     return res;
 }
 
 static int stratafs_vfs_create(vfs_node_t *parent, const char *name, uint32_t mode, vfs_node_t **out_child) {
-    return create_entry(parent, name, (uint16_t)(VFS_MODE_IFREG | (mode & 0777)), out_child);
+    return create_entry(parent, name, (uint16_t)(VFS_MODE_IFREG | (mode & 0777)), NULL, out_child);
 }
 
 static int stratafs_vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t mode, vfs_node_t **out_child) {
-    return create_entry(parent, name, (uint16_t)(VFS_MODE_IFDIR | (mode & 0777)), out_child);
+    return create_entry(parent, name, (uint16_t)(VFS_MODE_IFDIR | (mode & 0777)), NULL, out_child);
+}
+
+static int stratafs_vfs_symlink(vfs_node_t *parent, const char *name, const char *target) {
+    return create_entry(parent, name, VFS_MODE_IFLNK | 0777, target, NULL);
+}
+
+static int64_t stratafs_vfs_readlink(vfs_node_t *node, char *out, size_t size) {
+    stratafs_t *fs = node->mount->fs_priv;
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    stratafs_disk_inode_t inode;
+    int result = load_node(fs, node, &inode);
+    if (!result && (disk_type(&inode) != STRATAFS_FT_SYMLINK || !inode.size || inode.size >= VFS_MAX_PATH)) {
+        result = -STRATUM_EIO;
+    }
+    int64_t read = result ? result : stratafs_read_file(fs, &inode, 0, out, size);
+    spin_unlock_irqrestore(&fs->lock, flags);
+    return read;
 }
 
 static int free_file_blocks(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inode_t *inode) {
@@ -772,25 +812,170 @@ static int free_file_blocks(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inod
     return 0;
 }
 
-static int stratafs_vfs_unlink(vfs_node_t *parent, const char *name) {
+static int directory_empty(stratafs_t *fs, stratafs_disk_inode_t *dir, uint32_t ino, uint32_t parent) {
+    if (!dir->size || dir->size > STRATAFS_MAX_FILE_SIZE || dir->size % STRATAFS_BLOCK_SIZE) {
+        return -STRATUM_EIO;
+    }
+    stratafs_disk_dirent_t *entries = kmalloc(STRATAFS_BLOCK_SIZE);
+    if (!entries) return -STRATUM_ENOMEM;
+
+    unsigned dots = 0;
+    int result = 0;
+    for (uint32_t i = 0; i < dir->size / STRATAFS_BLOCK_SIZE && !result; i++) {
+        uint32_t block;
+        result = stratafs_get_block_mapping(fs, NULL, dir, i, false, &block);
+        if (result) break;
+        if (!block) {
+            result = -STRATUM_EIO;
+            break;
+        }
+        result = stratafs_read_block(fs, block, entries);
+        if (result) break;
+        for (unsigned j = 0; j < STRATAFS_BLOCK_SIZE / sizeof(*entries); j++) {
+            const stratafs_disk_dirent_t *entry = &entries[j];
+            if (!entry->inode_num) continue;
+            if (!stratafs_valid_dirent(entry, fs->sb.total_inodes)) {
+                result = -STRATUM_EIO;
+                break;
+            }
+            unsigned dot;
+            if (entry->name_len == 1 && entry->name[0] == '.') dot = 1;
+            else if (entry->name_len == 2 && !memcmp(entry->name, "..", 2)) dot = 2;
+            else {
+                result = -STRATUM_ENOTEMPTY;
+                break;
+            }
+            if ((dots & dot) || entry->file_type != STRATAFS_FT_DIR ||
+                entry->inode_num != (dot == 1 ? ino : parent)) {
+                result = -STRATUM_EIO;
+                break;
+            }
+            dots |= dot;
+        }
+    }
+    kfree(entries);
+    if (!result && (dots != 3 || dir->nlink != 2)) result = -STRATUM_EIO;
+    return result;
+}
+
+static int parent_link_change(stratafs_t *fs, journal_tx_t *tx, uint32_t ino,
+                              stratafs_disk_inode_t *dir, bool add) {
+    if (add && dir->nlink == 0xffff) return -STRATUM_EMLINK;
+    if (!add && dir->nlink <= 2) return -STRATUM_EIO;
+    dir->nlink += add ? 1 : -1;
+    return stratafs_write_inode(fs, tx, ino, dir);
+}
+
+static int drop_inode_link(stratafs_t *fs, journal_tx_t *tx, uint32_t ino,
+                           stratafs_disk_inode_t *inode) {
+    if (!inode->nlink) return -STRATUM_EIO;
+    if (!is_directory(inode)) {
+        inode->nlink--;
+        if (!inode->nlink && fs->open_count[ino]) inode->flags |= STRATAFS_INODE_ORPHAN;
+        if (inode->nlink || (inode->flags & STRATAFS_INODE_ORPHAN)) {
+            return stratafs_write_inode(fs, tx, ino, inode);
+        }
+    }
+    int result = free_file_blocks(fs, tx, inode);
+    return result ? result : stratafs_free_inode(fs, tx, ino);
+}
+
+static int stratafs_vfs_link(vfs_node_t *source, vfs_node_t *parent, const char *name) {
+    stratafs_t *fs = parent->mount->fs_priv;
+    uint64_t flags;
+    spin_lock_irqsave(&fs->lock, &flags);
+    stratafs_disk_inode_t inode, dir;
+    journal_tx_t *tx = NULL;
+    int result = load_node(fs, source, &inode);
+    if (!result && (inode.mode & STRATAFS_MODE_MASK) != VFS_MODE_IFREG) result = -STRATUM_EPERM;
+    if (!result && !inode.nlink) result = -STRATUM_ENOENT;
+    if (!result && inode.nlink == 0xffff) result = -STRATUM_EMLINK;
+    if (!result) result = load_node(fs, parent, &dir);
+    if (!result) {
+        uint32_t present;
+        result = stratafs_dir_lookup(fs, &dir, name, &present);
+        if (!result) result = -STRATUM_EEXIST;
+        else if (result == -STRATUM_ENOENT) result = 0;
+    }
+    if (!result) result = journal_begin(&fs->journal, &tx);
+    if (!result) {
+        result = stratafs_dir_add(fs, tx, (uint32_t)parent->inode_num, &dir, name,
+                                  (uint32_t)source->inode_num, STRATAFS_FT_REG);
+    }
+    if (!result) {
+        inode.nlink++;
+        result = stratafs_write_inode(fs, tx, (uint32_t)source->inode_num, &inode);
+    }
+    result = finish_tx(fs, tx, result);
+    spin_unlock_irqrestore(&fs->lock, flags);
+    return result;
+}
+
+static int remove_node(vfs_node_t *parent, const char *name, bool directory) {
     stratafs_t *fs = parent->mount->fs_priv;
     uint64_t flags;
     spin_lock_irqsave(&fs->lock, &flags);
     stratafs_disk_inode_t dir, inode;
     uint32_t ino = 0;
+    uint32_t parent_ino = (uint32_t)parent->inode_num;
     journal_tx_t *tx = NULL;
     int res = load_node(fs, parent, &dir);
     if (res == 0) res = stratafs_dir_lookup(fs, &dir, name, &ino);
     if (res == 0) res = stratafs_read_inode(fs, ino, &inode);
-    if (res == 0 && (is_directory(&inode) || !inode.mode)) res = -STRATUM_EISDIR;
-    if (res == 0 && fs->open_count[ino]) res = -STRATUM_EBUSY;
+    if (res == 0 && !inode.mode) res = -STRATUM_EIO;
+    if (res == 0 && is_directory(&inode) != directory) {
+        res = directory ? -STRATUM_ENOTDIR : -STRATUM_EISDIR;
+    }
+    if (res == 0 && directory && fs->open_count[ino]) res = -STRATUM_EBUSY;
+    if (res == 0 && directory) res = directory_empty(fs, &inode, ino, parent_ino);
     if (res == 0) res = journal_begin(&fs->journal, &tx);
     if (res == 0) res = remove_dirent(fs, tx, &dir, name);
-    if (res == 0) res = free_file_blocks(fs, tx, &inode);
-    if (res == 0) res = stratafs_free_inode(fs, tx, ino);
+    if (res == 0 && directory) res = parent_link_change(fs, tx, parent_ino, &dir, false);
+    if (res == 0) res = drop_inode_link(fs, tx, ino, &inode);
     res = finish_tx(fs, tx, res);
+    if (!res && (inode.flags & STRATAFS_INODE_ORPHAN)) fs->orphaned[ino] = true;
     spin_unlock_irqrestore(&fs->lock, flags);
     return res;
+}
+
+static int stratafs_vfs_unlink(vfs_node_t *parent, const char *name) {
+    return remove_node(parent, name, false);
+}
+
+static int stratafs_vfs_rmdir(vfs_node_t *parent, const char *name) {
+    return remove_node(parent, name, true);
+}
+
+static int check_move_parent(stratafs_t *fs, uint32_t source, uint32_t parent) {
+    for (uint32_t depth = 0; depth < fs->sb.total_inodes; depth++) {
+        if (parent == source) return -STRATUM_EINVAL;
+        if (parent == fs->sb.root_inode) return 0;
+        stratafs_disk_inode_t dir;
+        int result = stratafs_read_inode(fs, parent, &dir);
+        if (result) return result;
+        if (!is_directory(&dir)) return -STRATUM_EIO;
+        result = stratafs_dir_lookup(fs, &dir, "..", &parent);
+        if (result) return result;
+    }
+    return -STRATUM_EIO;
+}
+
+static int rewrite_dotdot(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inode_t *dir,
+                          uint32_t old_parent, uint32_t new_parent) {
+    stratafs_disk_dirent_t *entries = kmalloc(STRATAFS_BLOCK_SIZE);
+    if (!entries) return -STRATUM_ENOMEM;
+    uint32_t block, index;
+    int result = find_dirent(fs, tx, dir, "..", (uint8_t *)entries, &block, &index, false);
+    if (result == 0) {
+        if (entries[index].inode_num != old_parent || entries[index].file_type != STRATAFS_FT_DIR) {
+            result = -STRATUM_EIO;
+        } else {
+            entries[index].inode_num = new_parent;
+            result = journal_write_block(tx, block, entries);
+        }
+    }
+    kfree(entries);
+    return result;
 }
 
 static int stratafs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
@@ -800,10 +985,13 @@ static int stratafs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
     spin_lock_irqsave(&fs->lock, &flags);
 
     stratafs_disk_inode_t old_dir, new_dir, source, replaced;
-    bool same_parent = old_parent->inode_num == new_parent->inode_num;
+    uint32_t old_ino = (uint32_t)old_parent->inode_num;
+    uint32_t new_ino = (uint32_t)new_parent->inode_num;
+    bool same_parent = old_ino == new_ino;
     stratafs_disk_inode_t *destination = same_parent ? &old_dir : &new_dir;
     journal_tx_t *tx = NULL;
-    uint32_t src, dst;
+    uint32_t src, dst = 0;
+    bool defer_replaced = false;
 
     int res = load_node(fs, old_parent, &old_dir);
     if (res != 0) goto out;
@@ -816,9 +1004,15 @@ static int stratafs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
     if (same_parent && strcmp(old_name, new_name) == 0) goto out;
     res = stratafs_read_inode(fs, src, &source);
     if (res != 0) goto out;
-    if ((source.mode & STRATAFS_MODE_MASK) != VFS_MODE_IFREG) {
-        res = -STRATUM_EISDIR;
+    uint8_t type = disk_type(&source);
+    bool directory = type == STRATAFS_FT_DIR;
+    if (!type) {
+        res = -STRATUM_EIO;
         goto out;
+    }
+    if (directory && !same_parent) {
+        res = check_move_parent(fs, src, new_ino);
+        if (res) goto out;
     }
 
     res = stratafs_dir_lookup(fs, destination, new_name, &dst);
@@ -828,29 +1022,45 @@ static int stratafs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
         if (src == dst) goto out;
         res = stratafs_read_inode(fs, dst, &replaced);
         if (res != 0) goto out;
-        if ((replaced.mode & STRATAFS_MODE_MASK) != VFS_MODE_IFREG) {
-            res = -STRATUM_EISDIR;
+        if (is_directory(&replaced) != directory) {
+            res = directory ? -STRATUM_ENOTDIR : -STRATUM_EISDIR;
             goto out;
         }
-        if (fs->open_count[dst]) {
+        if (!replaced.mode) {
+            res = -STRATUM_EIO;
+            goto out;
+        }
+        if (directory && fs->open_count[dst]) {
             res = -STRATUM_EBUSY;
             goto out;
+        }
+        if (directory) {
+            res = directory_empty(fs, &replaced, dst, new_ino);
+            if (res) goto out;
         }
     }
 
     res = journal_begin(&fs->journal, &tx);
     if (res == 0 && replace) {
         res = remove_dirent(fs, tx, destination, new_name);
-        if (res == 0) res = free_file_blocks(fs, tx, &replaced);
-        if (res == 0) res = stratafs_free_inode(fs, tx, dst);
+        if (res == 0 && directory) res = parent_link_change(fs, tx, new_ino, destination, false);
+        if (res == 0) {
+            res = drop_inode_link(fs, tx, dst, &replaced);
+            defer_replaced = (replaced.flags & STRATAFS_INODE_ORPHAN) != 0;
+        }
     }
     if (res == 0) res = remove_dirent(fs, tx, &old_dir, old_name);
     if (res == 0) {
-        res = stratafs_dir_add(fs, tx, (uint32_t)new_parent->inode_num,
-                              destination, new_name, src, STRATAFS_FT_REG);
+        res = stratafs_dir_add(fs, tx, new_ino, destination, new_name, src, type);
+    }
+    if (res == 0 && directory && !same_parent) {
+        res = rewrite_dotdot(fs, tx, &source, old_ino, new_ino);
+        if (res == 0) res = parent_link_change(fs, tx, old_ino, &old_dir, false);
+        if (res == 0) res = parent_link_change(fs, tx, new_ino, &new_dir, true);
     }
 out:
     res = finish_tx(fs, tx, res);
+    if (!res && defer_replaced) fs->orphaned[dst] = true;
     spin_unlock_irqrestore(&fs->lock, flags);
     return res;
 }
@@ -903,6 +1113,7 @@ static int stratafs_vfs_open(vfs_node_t *node, uint32_t open_flags) {
     spin_lock_irqsave(&fs->lock, &flags);
     stratafs_disk_inode_t inode;
     int res = load_node(fs, node, &inode);
+    if (!res && !inode.nlink) res = -STRATUM_ENOENT;
     if (res == 0 && is_directory(&inode) && !(open_flags & O_DIRECTORY)) res = -STRATUM_EISDIR;
     if (res == 0 && (open_flags & O_TRUNC)) {
         journal_tx_t *tx = NULL;
@@ -919,13 +1130,31 @@ static int stratafs_vfs_open(vfs_node_t *node, uint32_t open_flags) {
     return res;
 }
 
+static int reclaim_orphan(stratafs_t *fs, uint32_t ino, stratafs_disk_inode_t *inode) {
+    if (inode->nlink || !inode->generation || inode->flags != STRATAFS_INODE_ORPHAN ||
+        (inode->mode & STRATAFS_MODE_MASK) != VFS_MODE_IFREG) return -STRATUM_EIO;
+    journal_tx_t *tx = NULL;
+    int result = journal_begin(&fs->journal, &tx);
+    if (!result) result = free_file_blocks(fs, tx, inode);
+    if (!result) result = stratafs_free_inode(fs, tx, ino);
+    return finish_tx(fs, tx, result);
+}
+
 static int stratafs_vfs_close(vfs_node_t *node) {
     stratafs_t *fs = node->mount->fs_priv;
     uint64_t flags;
     spin_lock_irqsave(&fs->lock, &flags);
-    fs->open_count[node->inode_num]--;
+    uint32_t ino = (uint32_t)node->inode_num;
+    int result = 0;
+    if (!--fs->open_count[ino] && fs->orphaned[ino]) {
+        stratafs_disk_inode_t inode;
+        result = load_node(fs, node, &inode);
+        if (!result) result = reclaim_orphan(fs, ino, &inode);
+        if (!result) fs->orphaned[ino] = false;
+        else kprintf("[STRATAFS] Orphan inode %u remains for mount recovery (%d).\n", ino, result);
+    }
     spin_unlock_irqrestore(&fs->lock, flags);
-    return 0;
+    return result;
 }
 
 static int64_t stratafs_vfs_read(vfs_node_t *node, uint64_t offset, void *buf, size_t count) {
@@ -998,6 +1227,10 @@ const vfs_node_ops_t g_stratafs_node_ops = {
     .create   = stratafs_vfs_create,
     .mkdir    = stratafs_vfs_mkdir,
     .unlink   = stratafs_vfs_unlink,
+    .rmdir    = stratafs_vfs_rmdir,
+    .link     = stratafs_vfs_link,
+    .symlink  = stratafs_vfs_symlink,
+    .readlink = stratafs_vfs_readlink,
     .rename   = stratafs_vfs_rename,
     .readdir  = stratafs_vfs_readdir,
     .stat     = stratafs_vfs_stat,
@@ -1013,7 +1246,9 @@ static vfs_node_t *stratafs_create_vfs_node(stratafs_t *fs, uint32_t ino, const 
     node->inode_num = ino;
     node->generation = dinode->generation;
     node->mount = fs->mount;
-    node->type = (dinode->mode & VFS_MODE_IFDIR) ? VFS_TYPE_DIR : VFS_TYPE_REG;
+    uint8_t type = disk_type(dinode);
+    node->type = type == STRATAFS_FT_DIR ? VFS_TYPE_DIR :
+        (type == STRATAFS_FT_SYMLINK ? VFS_TYPE_SYMLINK : VFS_TYPE_REG);
     node->mode = dinode->mode;
     node->size = dinode->size;
     node->atime = dinode->atime;
@@ -1057,6 +1292,69 @@ static bool blank_volume(stratafs_t *fs) {
     }
     kfree(buf);
     return blank;
+}
+
+static int check_detached(stratafs_t *fs, stratafs_disk_inode_t *dir, stratafs_disk_dirent_t *entries) {
+    if (!dir->size || dir->size > STRATAFS_MAX_FILE_SIZE || dir->size % STRATAFS_BLOCK_SIZE) {
+        return -STRATUM_EIO;
+    }
+    for (uint32_t i = 0; i < dir->size / STRATAFS_BLOCK_SIZE; i++) {
+        uint32_t block;
+        int result = stratafs_get_block_mapping(fs, NULL, dir, i, false, &block);
+        if (result || !block) return result ? result : -STRATUM_EIO;
+        result = stratafs_read_block(fs, block, entries);
+        if (result) return result;
+        for (unsigned j = 0; j < STRATAFS_BLOCK_SIZE / sizeof(*entries); j++) {
+            if (!stratafs_valid_dirent(&entries[j], fs->sb.total_inodes) ||
+                fs->orphaned[entries[j].inode_num]) return -STRATUM_EIO;
+        }
+    }
+    return 0;
+}
+
+static int recover_orphans(stratafs_t *fs) {
+    uint8_t *bitmap = kmalloc(STRATAFS_BLOCK_SIZE);
+    stratafs_disk_dirent_t *entries = kmalloc(STRATAFS_BLOCK_SIZE);
+    if (!bitmap || !entries) {
+        kfree(bitmap);
+        kfree(entries);
+        return -STRATUM_ENOMEM;
+    }
+    int result = stratafs_read_block(fs, fs->sb.inode_bitmap_block, bitmap);
+    unsigned reaped = 0;
+    for (uint32_t ino = 1; !result && ino < fs->sb.total_inodes; ino++) {
+        if (!(bitmap[ino / 8] & (1U << (ino % 8)))) continue;
+        stratafs_disk_inode_t inode;
+        result = stratafs_read_inode(fs, ino, &inode);
+        if (result || !(inode.flags & STRATAFS_INODE_ORPHAN)) continue;
+        if (ino == STRATAFS_ROOT_INO || inode.nlink || !inode.generation ||
+            inode.flags != STRATAFS_INODE_ORPHAN || disk_type(&inode) != STRATAFS_FT_REG) {
+            result = -STRATUM_EIO;
+            break;
+        }
+        fs->orphaned[ino] = true;
+        reaped++;
+    }
+    if (reaped) {
+        /* Refuse to reclaim any inode that a corrupt namespace still references. */
+        for (uint32_t ino = 1; !result && ino < fs->sb.total_inodes; ino++) {
+            if (!(bitmap[ino / 8] & (1U << (ino % 8)))) continue;
+            stratafs_disk_inode_t inode;
+            result = stratafs_read_inode(fs, ino, &inode);
+            if (!result && is_directory(&inode)) result = check_detached(fs, &inode, entries);
+        }
+        for (uint32_t ino = 1; !result && ino < fs->sb.total_inodes; ino++) {
+            if (!fs->orphaned[ino]) continue;
+            stratafs_disk_inode_t inode;
+            result = stratafs_read_inode(fs, ino, &inode);
+            if (!result) result = reclaim_orphan(fs, ino, &inode);
+            if (!result) fs->orphaned[ino] = false;
+        }
+        if (!result) kprintf("[STRATAFS] Reclaimed %u unlinked open inode(s) after recovery.\n", reaped);
+    }
+    kfree(bitmap);
+    kfree(entries);
+    return result;
 }
 
 int stratafs_mount_fs(vfs_mount_t *mnt, const char *dev_name) {
@@ -1109,6 +1407,9 @@ int stratafs_mount_fs(vfs_mount_t *mnt, const char *dev_name) {
         kprintf("[STRATAFS] Invalid root inode. Volume requires offline inspection.\n");
         return -STRATUM_EIO;
     }
+
+    res = recover_orphans(fs);
+    if (res) return res;
 
     vfs_node_t *root_node = stratafs_create_vfs_node(fs, STRATAFS_ROOT_INO, &root_dinode, "/");
     if (!root_node) return -STRATUM_ENOMEM;

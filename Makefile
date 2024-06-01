@@ -73,7 +73,7 @@ test-storage: image
 test-storage-crash: image
 	@$(PYTHON) scripts/test_wal_crash.py --repeats 10
 
-.PHONY: test-boot-campaign test-exec test-threads test-tlb test-ipc test-storage-mixed test-shared
+.PHONY: test-boot-campaign test-exec test-threads test-tlb test-ipc test-storage-mixed test-storage-namespace test-shared
 test-boot-campaign: image
 	@$(PYTHON) scripts/test_boot_campaign.py
 
@@ -91,6 +91,9 @@ test-shared: image
 
 test-ipc: image
 	@$(PYTHON) scripts/test_ipc.py
+
+test-storage-namespace: image
+	@$(PYTHON) scripts/test_storage_namespace.py
 
 test-storage-mixed: image
 	@$(PYTHON) tests/host/wal_model.py

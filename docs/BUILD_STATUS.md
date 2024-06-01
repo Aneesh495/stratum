@@ -1,6 +1,6 @@
 # Verification status
 
-The current verification baseline covers the normal QEMU image and an opt-in diagnostic boot. The [full acceptance plan](ACCEPTANCE_PLAN.md) remains open. `make acceptance` and `make release` fail while those workloads remain unverified. `make evidence` generates source-bound regression evidence under `build/evidence/`.
+The current verification baseline covers the normal QEMU image and an opt-in diagnostic boot. The [full acceptance plan](ACCEPTANCE_PLAN.md) remains open. `make acceptance` runs the fixed campaigns in a clean checkout and writes raw results under `build/acceptance/`. Its incomplete result keeps `make release` gated while required coverage remains open. `make evidence` generates source-bound regression evidence under `build/evidence/`.
 
 | Gate | Exercised in regression | Still required |
 | --- | --- | --- |
@@ -10,8 +10,8 @@ The current verification baseline covers the normal QEMU image and an opt-in dia
 | A04 | Ring 3 entry, 10,000 fork/exec/wait cycles, 25,000 thread joins with TLS and SSE state, and 10,000 boundary calls on each of 4 and 8 CPUs | Process-wide cancellation and broader boundary and reaping checks |
 | A05 | 100,000 verified pipe and channel transfers, 25,000 readiness races, backpressure, EOF, and descriptor generation checks on each of 4 and 8 CPUs | Process-wide cancellation and broader socket readiness races |
 | A06 | 150,000 real virtio-blk reads and two full block-queue wraps, and two full wraps of each virtio-net queue over an independent Ethernet link, 500 block-queue saturations, 500 real PCI resets, and 1,000 backend I/O errors | Cold-device workload and network-driver error and timeout recovery |
-| A07 | 128,006 mixed operations, 5,000 modeled crashes, 1,500 corrupt model states, 100 guest stops across ten WAL stages, and independent namespace traversal | Directory deletion and rename, links, open-unlinked lifetimes, block cache pressure and fault injection |
-| A08 | 150,000 verified UDP echoes over Ethernet, 10,000 rejected frames interleaved with 2,000 exact replies, guest TCP transfer with retransmission, and a host-client path | Full TCP workload and final source binding |
+| A07 | 128,006 mixed operations, 5,000 modeled crashes, 1,500 corrupt model states, 100 guest stops across ten WAL stages, independent namespace traversal, directory moves, hard and symbolic links, and open-unlinked recovery | Block-cache pressure, broader storage fault injection, and final evidence binding |
+| A08 | 150,000 verified UDP echoes over Ethernet, 10,000 rejected frames interleaved with 2,000 exact replies, and 1,000 TCP sessions with 316,211,200 verified bytes, including 200 impaired sessions at `76fd4a7` | Final evidence binding and direct independent TCP reference |
 | A09 | 32 live native TCP sessions, 100,000 verified requests, 10,000 records checked on both disks, and ten primary interruptions with recovery at `935682e` | Checkpoint replacement and final source binding |
 | A10 | Five bounded guest stress cycles and a 189-round mixed workload probe on 8 vCPUs and 1 GiB | Full 60-minute mixed workload and final evidence binding |
 | A11 | 2.1 million standalone parser-model mutations, a sanitizer probe of six production parsers, and independent wait/TLB exploration with negative controls | Full production-target fuzzing duration and source-bound evidence |
@@ -21,7 +21,7 @@ The original smoke reports and synthetic benchmark table were removed from the c
 
 ## Compatibility
 
-StrataFS checks the superblock and root inode before mounting. A disk with an invalid legacy root inode is left intact and requires offline inspection. The shell remains available if the root mount fails. Unlinking an open file returns `EBUSY`, and directory deletion and directory rename are pending.
+StrataFS checks the superblock and root inode before mounting. A disk with an invalid legacy root inode is left intact and requires offline inspection. The shell remains available if the root mount fails. Empty directories can be removed or replaced when closed. StrataFS recovers orphaned regular files during mount.
 
 Run the wire campaign with `make test-net-wrap`. Run the 10-minute production parser campaign with `make fuzz-production` from a clean commit. It preserves the starting seeds, discovered corpus, sanitizer logs, and execution counts under `build/`.
 

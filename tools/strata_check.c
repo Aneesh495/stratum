@@ -32,6 +32,7 @@
 #define MODE_TYPE                  0170000
 #define MODE_DIR                   0040000
 #define MODE_FILE                  0100000
+#define MODE_LINK                  0120000
 
 #define JOURNAL_MAGIC_SB            0x4A4F55524E414C31ULL /* "JOURNAL1" */
 
@@ -131,7 +132,7 @@ static uint32_t crc32(const void *data, size_t len) {
 }
 
 typedef struct {
-    uint32_t parent, dotdot, child_dirs;
+    uint32_t parent, dotdot, child_dirs, references;
     bool dot, dotdot_seen;
 } namespace_entry_t;
 
@@ -163,7 +164,8 @@ static bool scan_directory_block(FILE *fp, uint32_t block, uint32_t ino, uint32_
         }
         uint16_t type = inodes[target].mode & MODE_TYPE;
         if (!((type == MODE_FILE && entry->file_type == 1) ||
-              (type == MODE_DIR && entry->file_type == 2))) {
+              (type == MODE_DIR && entry->file_type == 2) ||
+              (type == MODE_LINK && entry->file_type == 3))) {
             fprintf(stderr, "Error: directory inode %u has a type mismatch for inode %u.\n", ino, target);
             return false;
         }
@@ -179,11 +181,12 @@ static bool scan_directory_block(FILE *fp, uint32_t block, uint32_t ino, uint32_
             nodes[ino].dotdot_seen = true;
             nodes[ino].dotdot = target;
         } else {
-            if (nodes[target].parent || target == STRATAFS_ROOT_INO) {
-                fprintf(stderr, "Error: inode %u has multiple namespace references or is the root.\n", target);
+            if (type == MODE_DIR && (nodes[target].parent || target == STRATAFS_ROOT_INO)) {
+                fprintf(stderr, "Error: directory inode %u has multiple parents or is the root.\n", target);
                 return false;
             }
             nodes[target].parent = ino;
+            nodes[target].references++;
             if (type == MODE_DIR) nodes[ino].child_dirs++;
         }
     }
@@ -205,12 +208,22 @@ static bool scan_inode(FILE *fp, const stratafs_sb_t *sb, uint32_t ino,
     const stratafs_disk_inode_t *inode = &inodes[ino];
     uint16_t type = inode->mode & MODE_TYPE;
     bool directory = type == MODE_DIR;
-    if ((!directory && type != MODE_FILE) || (ino == STRATAFS_ROOT_INO && !directory) ||
+    if ((!directory && type != MODE_FILE && type != MODE_LINK) || (ino == STRATAFS_ROOT_INO && !directory) ||
         !inode->nlink || !inode->generation || inode->double_indirect ||
         inode->size > STRATAFS_ADDRESSABLE * STRATAFS_BLOCK_SIZE ||
         (directory && (!inode->size || inode->size % STRATAFS_BLOCK_SIZE))) {
         fprintf(stderr, "Error: inode %u has invalid metadata.\n", ino);
         return false;
+    }
+
+    if (type == MODE_LINK) {
+        uint8_t target[STRATAFS_BLOCK_SIZE];
+        if (inode->size == 0 || inode->size >= 256 || inode->nlink != 1 ||
+            inode->direct[0] < sb->data_start_block || inode->direct[0] >= sb->total_blocks ||
+            !read_block(fp, inode->direct[0], target) || target[0] != '/' || memchr(target, 0, inode->size)) {
+            fprintf(stderr, "Error: inode %u has an invalid symbolic link.\n", ino);
+            return false;
+        }
     }
 
     uint32_t logical = (uint32_t)((inode->size + STRATAFS_BLOCK_SIZE - 1) / STRATAFS_BLOCK_SIZE);
@@ -261,7 +274,7 @@ static bool check_namespace(const stratafs_disk_inode_t *inodes, const uint8_t *
         uint32_t parent = root ? STRATAFS_ROOT_INO : node->parent;
         bool directory = (inodes[ino].mode & MODE_TYPE) == MODE_DIR;
         if (!parent || (directory && (!node->dot || !node->dotdot_seen || node->dotdot != parent)) ||
-            inodes[ino].nlink != (directory ? 2 + node->child_dirs : 1)) {
+            inodes[ino].nlink != (directory ? 2 + node->child_dirs : node->references)) {
             fprintf(stderr, "Error: inode %u has an invalid namespace parent or link count.\n", ino);
             return false;
         }

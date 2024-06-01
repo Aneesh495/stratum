@@ -13,8 +13,19 @@ The format uses little-endian fields and 4,096-byte blocks. The active layouts a
 | 580 onward | Directory, file, and indirect blocks |
 
 Inode zero is reserved and inode one is the root. Inodes have 12 direct pointers and one 1,024-entry indirect block. Zero block pointers in regular files read as holes. Each directory block contains sixteen fixed 256-byte entries. A zero inode field marks a free slot. An inode generation protects stale in-memory references after reuse.
-Regular files can be renamed across directories on the same volume. Replacement of
-a closed regular file commits in the same transaction as the move.
+File and directory renames commit as one transaction. Moving a directory across
+parents changes its `..` entry and both parents' link counts. The move rejects
+cycles, and replacement of a directory requires an empty closed destination.
+`rmdir` removes an empty closed directory. Hard links name the same regular
+inode. Symbolic links store an absolute path of up to 255 bytes. Resolution
+follows at most eight links. The directory entry type for a symbolic link is 3.
+
+Unlinking an open file, or replacing its last name by rename, sets the inode's
+orphan flag and clears its link count in the namespace transaction. Open
+descriptors retain the inode until final close. After journal replay, mounting
+reclaims orphan inodes only after checking that no directory still references
+them. The independent checker expects this recovery to finish before it checks
+a volume interrupted with open unlinked files.
 
 The journal publishes one pending transaction at a time. Commit writes a checksummed descriptor and block images, flushes, writes a commit record, and flushes again. It then persists the pending journal range before touching the home blocks. After checkpointing and flushing the home blocks, it clears the pending range and flushes the journal header. The filesystem serializes this sequence with its inode and bitmap updates.
 
@@ -31,3 +42,5 @@ types, dot entries, link counts, block ownership, and allocation counts.
 disposable volume, reboots it, verifies a durable fixture, and checks
 that six deliberately corrupted copies are rejected. The separate WAL
 model exercises 5,000 simulated crash states and 1,500 corrupted states.
+
+`make test-storage-namespace` checks directory moves, link identity, bounded symbolic links, and open-unlinked files across guest interruptions.

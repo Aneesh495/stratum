@@ -68,6 +68,7 @@ typedef struct stratafs {
     journal_t               journal;
     spinlock_t              lock;
     uint32_t                open_count[2048];
+    bool                    orphaned[2048];
     vfs_mount_t            *mount;
 } stratafs_t;
 

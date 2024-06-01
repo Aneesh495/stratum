@@ -220,20 +220,33 @@ static int64_t sys_mkdir_impl(const char *u_path, int mode) {
     return vfs_mkdir(kpath, mode);
 }
 
-static int64_t sys_unlink_impl(const char *u_path) {
+static int64_t sys_remove_impl(const char *u_path, bool directory) {
     if (!u_path) return -STRATUM_EINVAL;
     char kpath[VFS_MAX_PATH];
     memset(kpath, 0, sizeof(kpath));
     int path_result = copy_str_from_user(kpath, u_path, sizeof(kpath));
     if (path_result != 0) return path_result;
-    return vfs_unlink(kpath);
+    return directory ? vfs_rmdir(kpath) : vfs_unlink(kpath);
 }
 
-static int64_t sys_rename_impl(const char *old_path, const char *new_path) {
+static int64_t sys_move_impl(const char *old_path, const char *new_path, uint64_t operation) {
     char old_name[VFS_MAX_PATH], new_name[VFS_MAX_PATH];
     int res = copy_str_from_user(old_name, old_path, sizeof(old_name));
     if (res == 0) res = copy_str_from_user(new_name, new_path, sizeof(new_name));
-    return res ? res : vfs_rename(old_name, new_name);
+    if (res) return res;
+    if (operation == SYS_symlink) return vfs_symlink(old_name, new_name);
+    if (operation == SYS_link) return vfs_link(old_name, new_name);
+    return vfs_rename(old_name, new_name);
+}
+
+static int64_t sys_readlink_impl(const char *path, char *out, size_t size) {
+    if (!size) return -STRATUM_EINVAL;
+    char kpath[VFS_MAX_PATH], target[VFS_MAX_PATH];
+    int result = copy_str_from_user(kpath, path, sizeof(kpath));
+    if (result) return result;
+    int64_t length = vfs_readlink(kpath, target, size < sizeof(target) ? size : sizeof(target));
+    if (length > 0 && copy_to_user(out, target, (size_t)length) != 0) return -STRATUM_EFAULT;
+    return length;
 }
 
 static int64_t sys_readdir_impl(int fd, strat_dirent_t *user_entry) {
@@ -548,12 +561,17 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
         return sys_mkdir_impl((const char *)regs->rdi, (int)regs->rsi);
     }
 
-    case SYS_unlink: {
-        return sys_unlink_impl((const char *)regs->rdi);
-    }
+    case SYS_unlink:
+    case SYS_rmdir:
+        return sys_remove_impl((const char *)regs->rdi, nr == SYS_rmdir);
 
     case SYS_rename:
-        return sys_rename_impl((const char *)regs->rdi, (const char *)regs->rsi);
+    case SYS_link:
+    case SYS_symlink:
+        return sys_move_impl((const char *)regs->rdi, (const char *)regs->rsi, nr);
+
+    case SYS_readlink:
+        return sys_readlink_impl((const char *)regs->rdi, (char *)regs->rsi, regs->rdx);
 
     case SYS_readdir:
         return sys_readdir_impl((int)regs->rdi, (strat_dirent_t *)regs->rsi);

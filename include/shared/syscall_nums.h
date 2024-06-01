@@ -39,6 +39,10 @@
 #define SYS_rename          43
 #define SYS_readdir         44
 #define SYS_fsync           45
+#define SYS_rmdir           46
+#define SYS_link            47
+#define SYS_symlink         48
+#define SYS_readlink        49
 
 #define SYS_socket          50
 #define SYS_bind            51

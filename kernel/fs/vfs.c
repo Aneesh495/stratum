@@ -238,84 +238,87 @@ static int split_component(const char **path_ptr, char *out_name) {
     return 1;
 }
 
-int vfs_resolve_path(const char *path, vfs_node_t **out_node) {
-    if (!path || !out_node) return -STRATUM_EINVAL;
+#define VFS_LINK_LIMIT 8
 
-    const char *subpath = NULL;
-    vfs_mount_t *mnt = vfs_find_mount(path, &subpath);
-    if (!mnt || !mnt->root_node) return -STRATUM_ENOENT;
-
-    vfs_node_t *curr = mnt->root_node;
-    vfs_node_ref(curr);
-
-    char comp[VFS_MAX_NAME];
-    int component;
-    while ((component = split_component(&subpath, comp)) > 0) {
-
-        if (!curr->ops || !curr->ops->lookup) {
-            vfs_node_release(curr);
-            return -STRATUM_ENOTDIR;
-        }
-
-        vfs_node_t *next = NULL;
-        int res = curr->ops->lookup(curr, comp, &next);
-        vfs_node_release(curr);
-        if (res != 0 || !next) {
-            return res ? res : -STRATUM_EIO;
-        }
-        curr = next;
-    }
-
-    if (component < 0) {
-        vfs_node_release(curr);
-        return component;
-    }
-    *out_node = curr;
+static int expand_link(vfs_node_t *node, const char *rest, char rewritten[VFS_MAX_PATH]) {
+    char target[VFS_MAX_PATH];
+    if (!node->ops || !node->ops->readlink) return -STRATUM_EIO;
+    int64_t length = node->ops->readlink(node, target, sizeof(target));
+    if (length < 0) return (int)length;
+    if (!length || length >= sizeof(target) || target[0] != '/') return -STRATUM_EIO;
+    for (int64_t i = 0; i < length; i++) if (!target[i]) return -STRATUM_EIO;
+    size_t suffix = strlen(rest);
+    if ((size_t)length + suffix >= VFS_MAX_PATH) return -STRATUM_ENAMETOOLONG;
+    /* rest can point into the previous rewritten path. */
+    memmove(rewritten + length, rest, suffix + 1);
+    memcpy(rewritten, target, (size_t)length);
     return 0;
 }
 
-static int vfs_resolve_parent(const char *path, vfs_node_t **out_parent, char *out_name) {
-    if (!path || !out_parent || !out_name) return -STRATUM_EINVAL;
+/* out_name selects parent resolution. Otherwise, follow_final selects leaf links. */
+static int walk_path(const char *path, vfs_node_t **out, char *out_name, bool follow_final) {
+    if (!path || !out) return -STRATUM_EINVAL;
+    char rewritten[VFS_MAX_PATH];
+    unsigned links = 0;
 
-    const char *subpath = NULL;
-    vfs_mount_t *mnt = vfs_find_mount(path, &subpath);
-    if (!mnt || !mnt->root_node) return -STRATUM_ENOENT;
+    for (;;) {
+        const char *subpath = NULL;
+        vfs_mount_t *mount = vfs_find_mount(path, &subpath);
+        if (!mount || !mount->root_node) return -STRATUM_ENOENT;
+        vfs_node_t *current = mount->root_node;
+        vfs_node_ref(current);
 
-    vfs_node_t *curr = mnt->root_node;
-    vfs_node_ref(curr);
-
-    char comp[VFS_MAX_NAME];
-    int component;
-    while ((component = split_component(&subpath, comp)) > 0) {
-        const char *lookahead = subpath;
-        while (*lookahead == '/') lookahead++;
-        if (*lookahead == '\0') {
-            if (strcmp(comp, ".") == 0 || strcmp(comp, "..") == 0) {
-                vfs_node_release(curr);
-                return -STRATUM_EINVAL;
+        char name[VFS_MAX_NAME];
+        int component;
+        bool restart = false;
+        while ((component = split_component(&subpath, name)) > 0) {
+            const char *rest = subpath;
+            while (*rest == '/') rest++;
+            bool final = !*rest;
+            if (out_name && final) {
+                if (!strcmp(name, ".") || !strcmp(name, "..")) {
+                    vfs_node_release(current);
+                    return -STRATUM_EINVAL;
+                }
+                strcpy(out_name, name);
+                *out = current;
+                return 0;
             }
-            strcpy(out_name, comp);
-            *out_parent = curr;
-            return 0;
+            if (!current->ops || !current->ops->lookup) {
+                vfs_node_release(current);
+                return -STRATUM_ENOTDIR;
+            }
+            vfs_node_t *next = NULL;
+            int result = current->ops->lookup(current, name, &next);
+            vfs_node_release(current);
+            if (result || !next) return result ? result : -STRATUM_EIO;
+            if (next->type == VFS_TYPE_SYMLINK && (!final || follow_final)) {
+                result = ++links > VFS_LINK_LIMIT ? -STRATUM_ELOOP : expand_link(next, subpath, rewritten);
+                vfs_node_release(next);
+                if (result) return result;
+                path = rewritten;
+                restart = true;
+                break;
+            }
+            current = next;
         }
-
-        /* Not the leaf, descend */
-        if (!curr->ops || !curr->ops->lookup) {
-            vfs_node_release(curr);
-            return -STRATUM_ENOTDIR;
+        if (restart) continue;
+        if (component < 0 || out_name) {
+            vfs_node_release(current);
+            return component < 0 ? component : -STRATUM_EINVAL;
         }
-
-        vfs_node_t *next = NULL;
-        int res = curr->ops->lookup(curr, comp, &next);
-        vfs_node_release(curr);
-        if (res != 0 || !next) {
-            return res ? res : -STRATUM_EIO;
-        }
-        curr = next;
+        *out = current;
+        return 0;
     }
+}
 
-    vfs_node_release(curr);
-    return component < 0 ? component : -STRATUM_EINVAL;
+int vfs_resolve_path(const char *path, vfs_node_t **out_node) {
+    return walk_path(path, out_node, NULL, true);
+}
+
+static int vfs_resolve_parent(const char *path, vfs_node_t **out_parent, char *out_name) {
+    if (!out_name) return -STRATUM_EINVAL;
+    return walk_path(path, out_parent, out_name, false);
 }
 
 int vfs_open(const char *path, int flags, int mode, file_t **out_file) {
@@ -324,7 +327,8 @@ int vfs_open(const char *path, int flags, int mode, file_t **out_file) {
         ((flags & O_DIRECTORY) && (flags & (3 | O_CREAT | O_TRUNC | O_APPEND)))) return -STRATUM_EINVAL;
 
     vfs_node_t *node = NULL;
-    int res = vfs_resolve_path(path, &node);
+    bool exclusive = (flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL);
+    int res = walk_path(path, &node, NULL, !exclusive);
 
     if (res != 0) {
         if (res == -STRATUM_ENOENT && (flags & O_CREAT)) {
@@ -347,7 +351,7 @@ int vfs_open(const char *path, int flags, int mode, file_t **out_file) {
         } else {
             return res;
         }
-    } else if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) {
+    } else if (exclusive) {
         vfs_node_release(node);
         return -STRATUM_EEXIST;
     }
@@ -460,7 +464,7 @@ int vfs_mkdir(const char *path, int mode) {
     return res;
 }
 
-int vfs_unlink(const char *path) {
+static int remove_path(const char *path, bool directory) {
     if (!path) return -STRATUM_EINVAL;
 
     vfs_node_t *parent = NULL;
@@ -468,14 +472,60 @@ int vfs_unlink(const char *path) {
     int res = vfs_resolve_parent(path, &parent, name);
     if (res != 0) return res;
 
-    if (!parent->ops || !parent->ops->unlink) {
-        vfs_node_release(parent);
-        return -STRATUM_ENOSYS;
+    if (!parent->ops) res = -STRATUM_ENOSYS;
+    else {
+        int (*remove)(vfs_node_t *, const char *) = directory ? parent->ops->rmdir : parent->ops->unlink;
+        res = remove ? remove(parent, name) : -STRATUM_ENOSYS;
     }
-
-    res = parent->ops->unlink(parent, name);
     vfs_node_release(parent);
     return res;
+}
+
+int vfs_unlink(const char *path) {
+    return remove_path(path, false);
+}
+
+int vfs_rmdir(const char *path) {
+    return remove_path(path, true);
+}
+
+int vfs_link(const char *source_path, const char *target_path) {
+    vfs_node_t *source, *target;
+    char name[VFS_MAX_NAME];
+    int result = walk_path(source_path, &source, NULL, false);
+    if (result) return result;
+    result = vfs_resolve_parent(target_path, &target, name);
+    if (!result) {
+        if (source->mount != target->mount) result = -STRATUM_EXDEV;
+        else if (!target->ops || !target->ops->link) result = -STRATUM_ENOTSUP;
+        else result = target->ops->link(source, target, name);
+        vfs_node_release(target);
+    }
+    vfs_node_release(source);
+    return result;
+}
+
+int vfs_symlink(const char *target, const char *path) {
+    if (!target || target[0] != '/') return -STRATUM_EINVAL;
+    vfs_node_t *parent;
+    char name[VFS_MAX_NAME];
+    int result = vfs_resolve_parent(path, &parent, name);
+    if (!result) {
+        result = parent->ops && parent->ops->symlink ? parent->ops->symlink(parent, name, target) : -STRATUM_ENOTSUP;
+        vfs_node_release(parent);
+    }
+    return result;
+}
+
+int64_t vfs_readlink(const char *path, char *out, size_t size) {
+    vfs_node_t *node;
+    int64_t result = walk_path(path, &node, NULL, false);
+    if (!result) {
+        if (node->type != VFS_TYPE_SYMLINK || !node->ops || !node->ops->readlink) result = -STRATUM_EINVAL;
+        else result = node->ops->readlink(node, out, size);
+        vfs_node_release(node);
+    }
+    return result;
 }
 
 int vfs_rename(const char *old_path, const char *new_path) {

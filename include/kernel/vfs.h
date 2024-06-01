@@ -35,6 +35,7 @@
 #define VFS_TYPE_CHR        0x03
 #define VFS_TYPE_BLK        0x04
 #define VFS_TYPE_FIFO       0x05
+#define VFS_TYPE_SYMLINK    0x06
 
 typedef struct vfs_stat {
     uint64_t st_ino;
@@ -64,6 +65,10 @@ typedef struct vfs_node_ops {
     int     (*create)(struct vfs_node *parent, const char *name, uint32_t mode, struct vfs_node **out_child);
     int     (*mkdir)(struct vfs_node *parent, const char *name, uint32_t mode, struct vfs_node **out_child);
     int     (*unlink)(struct vfs_node *parent, const char *name);
+    int     (*rmdir)(struct vfs_node *parent, const char *name);
+    int     (*link)(struct vfs_node *source, struct vfs_node *parent, const char *name);
+    int     (*symlink)(struct vfs_node *parent, const char *name, const char *target);
+    int64_t (*readlink)(struct vfs_node *node, char *out, size_t size);
     int     (*rename)(struct vfs_node *old_parent, const char *old_name,
                       struct vfs_node *new_parent, const char *new_name);
     int     (*readdir)(struct vfs_node *dir, uint64_t *index, vfs_dirent_t *out_dirent);
@@ -136,6 +141,10 @@ int64_t     vfs_lseek(file_t *file, int64_t offset, int whence);
 int         vfs_close(file_t *file);
 int         vfs_mkdir(const char *path, int mode);
 int         vfs_unlink(const char *path);
+int         vfs_rmdir(const char *path);
+int         vfs_link(const char *source, const char *target);
+int         vfs_symlink(const char *target, const char *name);
+int64_t     vfs_readlink(const char *name, char *out, size_t size);
 int         vfs_rename(const char *old_path, const char *new_path);
 int         vfs_fstat(file_t *file, vfs_stat_t *st);
 int         vfs_stat(const char *path, vfs_stat_t *st);
