@@ -123,12 +123,21 @@ def main():
             print("No regression bundle found. Run make evidence.", file=sys.stderr)
             return 1
         root = candidates[-1]
+    full = (root / "MANIFEST.json").is_file()
     try:
-        verify(root)
+        if full:
+            from verify_acceptance import verify as verify_full
+
+            verify_full(root)
+        else:
+            verify(root)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"Evidence rejected: {error}", file=sys.stderr)
         return 1
-    print(f"Verified regression bundle {root}. Full acceptance remains unverified.")
+    if full:
+        print(f"Verified full acceptance bundle {root}.")
+    else:
+        print(f"Verified regression bundle {root}. Full acceptance remains unverified.")
     return 0
 
 

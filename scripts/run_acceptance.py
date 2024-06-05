@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate fresh regression evidence from two isolated copies of committed source."""
+"""Generate fixed workload or regression evidence from committed Stratum source."""
 
 import argparse
 from datetime import datetime, timezone
@@ -51,9 +51,13 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="generate the supported regression bundle")
     args = parser.parse_args()
     if not args.smoke:
-        print("Full acceptance is unverified. See docs/BUILD_STATUS.md for open gates.", file=sys.stderr)
-        print("Run make evidence to generate and verify the supported regression bundle.", file=sys.stderr)
-        return 2
+        import full_acceptance
+
+        try:
+            return full_acceptance.run()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            print(f"Acceptance runner failed: {error}", file=sys.stderr)
+            return 2
 
     if git("status", "--porcelain"):
         parser.error("commit or set aside working tree changes before generating evidence")
