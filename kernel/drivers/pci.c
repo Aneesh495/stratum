@@ -265,3 +265,45 @@ uint8_t pci_find_capability(pci_device_t *dev, uint8_t cap_id) {
 pci_device_t *pci_get_device_list(void) {
     return g_pci_device_list;
 }
+
+#define MSIX_ENABLE       0x8000U
+#define MSIX_FUNCTION_MASK 0x4000U
+
+typedef struct {
+    uint32_t address_low;
+    uint32_t address_high;
+    uint32_t data;
+    uint32_t control;
+} msix_entry_t;
+
+bool pci_configure_msix(pci_device_t *dev, uint16_t entry, uint8_t vector, uint8_t apic_id) {
+    uint8_t cap = pci_find_capability(dev, PCI_CAP_ID_MSIX);
+    if (!cap || cap > 244 || vector < 32) return false;
+    uint16_t control = pci_read_config16(dev->bus, dev->slot, dev->func, cap + 2);
+    unsigned count = (control & 0x7ffU) + 1;
+    uint32_t location = pci_read_config32(dev->bus, dev->slot, dev->func, cap + 4);
+    unsigned bar_index = location & 7;
+    uint32_t offset = location & ~7U;
+    if (entry >= count || bar_index >= 6) return false;
+
+    const pci_bar_t *bar = &dev->bars[bar_index];
+    if (bar->is_io || !bar->base_virt || offset > bar->size ||
+        count * sizeof(msix_entry_t) > bar->size - offset) return false;
+    volatile msix_entry_t *table = (volatile void *)((uint8_t *)bar->base_virt + offset);
+    pci_write_config16(dev->bus, dev->slot, dev->func, cap + 2, control | MSIX_ENABLE | MSIX_FUNCTION_MASK);
+    for (unsigned i = 0; i < count; i++) table[i].control = 1;
+    table[entry].address_low = 0xfee00000U | ((uint32_t)apic_id << 12);
+    table[entry].address_high = 0;
+    table[entry].data = vector;
+    table[entry].control = 0;
+    (void)table[entry].control;
+    pci_write_config16(dev->bus, dev->slot, dev->func, cap + 2, (control | MSIX_ENABLE) & ~MSIX_FUNCTION_MASK);
+    return true;
+}
+
+void pci_disable_msix(pci_device_t *dev) {
+    uint8_t cap = pci_find_capability(dev, PCI_CAP_ID_MSIX);
+    if (!cap || cap > 244) return;
+    uint16_t control = pci_read_config16(dev->bus, dev->slot, dev->func, cap + 2);
+    pci_write_config16(dev->bus, dev->slot, dev->func, cap + 2, (control | MSIX_FUNCTION_MASK) & ~MSIX_ENABLE);
+}

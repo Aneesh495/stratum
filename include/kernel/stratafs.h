@@ -75,6 +75,7 @@ typedef struct stratafs {
 /* StrataFS API */
 int  stratafs_init(void);
 bool stratafs_is_mounted(void);
+void stratafs_journal_usage(uint32_t *capacity, uint32_t *pending);
 int  stratafs_format(virtio_blk_dev_t *dev);
 int  stratafs_mount_fs(vfs_mount_t *mnt, const char *dev_name);
 

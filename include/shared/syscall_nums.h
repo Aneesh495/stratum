@@ -60,6 +60,8 @@
 #define SYS_sysinfo         71
 #define SYS_sched_switches  72
 #define SYS_net_queues      73
+#define SYS_net_rx_irqs     74
+#define SYS_resources       75
 
 #define STRAT_CHANNEL_MAX_MESSAGE     512
 #define STRAT_CHANNEL_QUEUE_CAPACITY  8
@@ -139,6 +141,14 @@ typedef struct strat_sysinfo {
     uint64_t free_memory_bytes;
     uint64_t total_syscalls;
 } strat_sysinfo_t;
+
+typedef struct strat_resources {
+    uint64_t threads;
+    uint64_t file_objects;
+    uint64_t packet_buffers;
+    uint32_t journal_capacity;
+    uint32_t journal_pending;
+} strat_resources_t;
 
 typedef struct strat_queue_stats {
     uint64_t submitted;

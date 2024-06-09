@@ -1,6 +1,8 @@
 # IPv4 and record service contract
 
-A dedicated kernel worker services the virtio-net split queues and TCP timers on the bootstrap CPU.
+An MSI-X receive interrupt wakes a dedicated kernel worker on the bootstrap CPU.
+The worker also runs the TCP timers and falls back to timed polling when an
+interrupt is unavailable.
 Its default static address is `10.0.2.15/24`, with gateway `10.0.2.2`. An
 `ip=<address>` line in the EFI partition's `cmdline.txt` sets the guest
 address for isolated Ethernet links.

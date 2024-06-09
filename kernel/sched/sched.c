@@ -117,6 +117,12 @@ static thread_t *rq_steal_work(uint32_t my_cpu) {
     return NULL;
 }
 
+static uint64_t live_threads;
+
+uint64_t sched_live_threads(void) {
+    return __atomic_load_n(&live_threads, __ATOMIC_ACQUIRE);
+}
+
 void sched_finish_switch(void) {
     uint32_t cpu_id = smp_get_cpu_id();
     runqueue_t *rq = &g_runqueues[cpu_id];
@@ -136,6 +142,7 @@ void sched_finish_switch(void) {
             }
             spin_lock(&g_thread_pool_lock);
             prev->state = THREAD_STATE_UNUSED;
+            __atomic_sub_fetch(&live_threads, 1, __ATOMIC_RELEASE);
             spin_unlock(&g_thread_pool_lock);
             if (process) process_finish_thread(process, slot, status);
         }
@@ -269,6 +276,7 @@ static thread_t *thread_create_internal(const char *name, void (*entry)(void *),
     runqueue_t *rq = &g_runqueues[target_cpu];
     uint64_t rq_flags;
     spin_lock_irqsave(&rq->lock, &rq_flags);
+    __atomic_add_fetch(&live_threads, 1, __ATOMIC_RELEASE);
     rq_enqueue(rq, t);
     bool target_idle = rq->current_thread == rq->idle_thread;
     spin_unlock_irqrestore(&rq->lock, rq_flags);

@@ -18,6 +18,11 @@
 static kmem_cache_t *g_pbuf_cache = NULL;
 static netif_t       g_default_netif;
 static bool          g_net_initialized = false;
+static uint64_t      live_buffers;
+
+uint64_t pbuf_live_count(void) {
+    return __atomic_load_n(&live_buffers, __ATOMIC_ACQUIRE);
+}
 
 pbuf_t *pbuf_alloc(size_t size) {
     if (size > PBUF_MAX_SIZE) return NULL;
@@ -32,7 +37,7 @@ pbuf_t *pbuf_alloc(size_t size) {
     p->tot_len = (uint16_t)size;
     p->refcount = 1;
     p->next = NULL;
-
+    __atomic_add_fetch(&live_buffers, 1, __ATOMIC_RELEASE);
     return p;
 }
 
@@ -45,6 +50,7 @@ void pbuf_free(pbuf_t *p) {
     if (!p) return;
     if (__atomic_sub_fetch(&p->refcount, 1, __ATOMIC_SEQ_CST) == 0) {
         kmem_cache_free(g_pbuf_cache, p);
+        __atomic_sub_fetch(&live_buffers, 1, __ATOMIC_RELEASE);
     }
 }
 
@@ -106,16 +112,17 @@ void net_poll(void) {
 }
 
 static void net_worker(void *arg) {
-    (void)arg;
+    virtio_net_dev_t *dev = arg;
     for (;;) {
+        uint64_t previous = virtio_net_rx_irq_count();
         net_poll();
-        thread_sleep_ms(1);
+        virtio_net_wait_rx(dev, previous);
     }
 }
 
 void net_start_worker(void) {
     if (g_default_netif.driver_priv &&
-        !thread_create_on_cpu("net-rx", net_worker, NULL, THREAD_PRIO_HIGH, 0)) {
+        !thread_create_on_cpu("net-rx", net_worker, g_default_netif.driver_priv, THREAD_PRIO_HIGH, 0)) {
         kprintf("[NET] Failed to start the receive worker.\n");
     }
 }

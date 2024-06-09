@@ -291,6 +291,10 @@ static inline int strat_getcpu(void) {
     return (int)syscall0(SYS_getcpu);
 }
 
+static inline uint64_t strat_net_rx_irqs(void) {
+    return (uint64_t)syscall0(SYS_net_rx_irqs);
+}
+
 static inline int strat_net_queues(strat_queue_stats_t queues[2]) {
     return (int)syscall1(SYS_net_queues, (uintptr_t)queues);
 }
@@ -309,6 +313,10 @@ static inline uint64_t uptime(void) {
 
 static inline int sysinfo(strat_sysinfo_t *info) {
     return (int)syscall1(SYS_sysinfo, (uint64_t)info);
+}
+
+static inline int strat_resources(strat_resources_t *resources) {
+    return (int)syscall1(SYS_resources, (uintptr_t)resources);
 }
 
 static inline void trace_emit(uint32_t event_id, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {

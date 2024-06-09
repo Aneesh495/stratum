@@ -128,6 +128,14 @@ static void cmd_sysinfo(void) {
     u_printf("  Total Memory: %lu KiB\n", info.total_memory_bytes / 1024);
     u_printf("  Free Memory:  %lu KiB\n", info.free_memory_bytes / 1024);
     u_printf("  Syscalls:     %lu\n", info.total_syscalls);
+    strat_resources_t resources;
+    if (!strat_resources(&resources)) {
+        u_printf("  Live Threads: %lu\n", resources.threads);
+        u_printf("  File Objects: %lu\n", resources.file_objects);
+        u_printf("  Packet Buffers: %lu\n", resources.packet_buffers);
+        u_printf("  Journal Capacity: %u\n", resources.journal_capacity);
+        u_printf("  Journal Pending: %u\n", resources.journal_pending);
+    }
 }
 
 static int cmd_write(int argc, char **argv) {

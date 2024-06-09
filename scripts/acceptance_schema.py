@@ -17,15 +17,12 @@ GATES = {
     "A12": ("regression", "benchmarks", "documentation"),
 }
 GAPS = {
-    "A02": "Real allocator exhaustion and failure rollback coverage",
     "A03": "Process-wide cancellation and bounded scheduler fairness checks",
     "A04": "Process-wide cancellation and broader boundary cases",
     "A05": "Cancellation races and broader socket readiness checks",
     "A06": "Interrupt-driven block completion and device timeout recovery under load",
     "A07": "Block-cache pressure and storage allocation failure injection",
     "A08": "Direct independent TCP reference on the Ethernet link",
-    "A09": "Durable service checkpoint replacement",
-    "A10": "Independent quiescent task, buffer, and journal reconciliation",
     "A12": "Complete capability evidence, independent negative controls, and hosted release verification",
 }
 

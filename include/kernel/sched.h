@@ -86,6 +86,7 @@ thread_t *thread_create_worker(struct process *process, uint32_t slot, uint64_t 
                                void (*entry)(void *), void *arg);
 void      thread_reset_user_state(thread_t *thread);
 void      thread_exit(void);
+uint64_t  sched_live_threads(void);
 void      thread_yield(void);
 void      thread_sleep_ms(uint32_t ms);
 void      thread_wake(thread_t *thread);

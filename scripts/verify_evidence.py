@@ -123,7 +123,7 @@ def main():
             print("No regression bundle found. Run make evidence.", file=sys.stderr)
             return 1
         root = candidates[-1]
-    full = (root / "MANIFEST.json").is_file()
+    full = (root / "ACCEPTANCE.json").is_file()
     try:
         if full:
             from verify_acceptance import verify as verify_full

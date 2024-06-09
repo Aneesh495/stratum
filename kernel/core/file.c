@@ -9,6 +9,11 @@
 #include <shared/syscall_nums.h>
 
 static kmem_cache_t *g_file_cache = NULL;
+static uint64_t live_objects;
+
+uint64_t file_live_objects(void) {
+    return __atomic_load_n(&live_objects, __ATOMIC_ACQUIRE);
+}
 
 static int64_t console_read(file_t *file, void *buf, size_t count) {
     (void)file;
@@ -74,7 +79,7 @@ file_t *file_alloc(file_type_t type, const file_ops_t *ops, void *priv) {
     f->priv = priv;
     f->refcount = 1;
     spin_lock_init(&f->lock);
-
+    __atomic_add_fetch(&live_objects, 1, __ATOMIC_RELEASE);
     return f;
 }
 
@@ -91,6 +96,7 @@ void file_close(file_t *f) {
             f->ops->close(f);
         }
         kmem_cache_free(g_file_cache, f);
+        __atomic_sub_fetch(&live_objects, 1, __ATOMIC_RELEASE);
     }
 }
 

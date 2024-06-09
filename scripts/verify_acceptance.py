@@ -107,6 +107,61 @@ def verify(root):
             require(list(map(int, observed)) == list(range(cpus)), f"{tag}: missing CPU probe")
         require((boot_path.parent / "entry.json").is_file(), "missing debugger boot observation")
 
+    if acceptance["gates"]["A02"]["status"] == "passed":
+        exhaustion = result_path("shared", "exhaust.log").read_bytes()
+        require(b"allocator exhaustion, rollback, retry and final page recovery" in exhaustion,
+                "missing real allocator exhaustion")
+        require(b"2000000 / 2000000 ops completed" in (root / "logs/host.log").read_bytes(),
+                "allocator model count mismatch")
+        for cpu in (4, 8):
+            shared = result_path("shared", f"{cpu}cpu.log").read_bytes()
+            tlb = result_path("tlb", f"{cpu}cpu.log").read_bytes()
+            require(b"shared mappings=2000 COW=2000" in shared and
+                    f"cycles=10000 CPUs={cpu}".encode() in tlb, f"{cpu}: missing mapping evidence")
+        demand = sum(b"12800 demand-zero allocations reconciled" in
+                     result_path("diagnostics", f"stress-{cpu}.log").read_bytes()
+                     for cpu in (1, 2, 4, 8))
+        require(demand * 12800 >= 50000, "demand fault count below threshold")
+
+    if acceptance["gates"]["A09"]["status"] == "passed":
+        result = document(result_path("service", "results.json"))
+        require(result["clients"] == 32 and result["logical_requests"] == 100000 and
+                result["durable_records"] == 10000 and len(result["interruptions"]) == 10,
+                "integrated service counts do not match the fixed workload")
+        records = re.findall(rb"^\[RECORD\] entry(\d{4}) durable\r?$",
+                             result_path("service", "follower.log").read_bytes(), re.M)
+        require(len(records) == 10000 and set(map(int, records)) == set(range(10000)),
+                "missing or duplicate durable service acknowledgments")
+        for i, row in enumerate(result["interruptions"], 1):
+            require(row["acknowledged_records"] > 0 and
+                    b"ledgerd listening on port 9090." in result_path("service", f"primary-{i:02d}.log").read_bytes(),
+                    f"missing service recovery {i}")
+        for role in ("primary", "follower"):
+            require(b"[PASSED]" in result_path("service", f"{role}-check.log").read_bytes(),
+                    f"missing independent {role} disk check")
+        require(file_hash(result_path("service", "ethernet.pcap")) == result["pcap_sha256"],
+                "integrated service packet capture mismatch")
+
+    if acceptance["gates"]["A10"]["status"] == "passed":
+        result = document(result_path("soak", "results.json"))
+        rounds = [json.loads(row) for row in result_path("soak", "rounds.jsonl").read_text().splitlines()]
+        require(result["cpus"] == 8 and result["memory"] == "1G" and
+                result["requested_seconds"] == 3600 and len(rounds) == result["rounds"] and
+                result["elapsed_seconds"] >= 3600, "soak profile, count or duration mismatch")
+        baseline = result["baseline"]
+        observed = ("processes", "free_kib", "threads", "files", "packets", "journal_capacity", "journal_pending")
+        elapsed, uptime, syscalls = 0, baseline["uptime_ms"], baseline["syscalls"]
+        for index, row in enumerate(rounds, 1):
+            require(row["round"] == index and row["elapsed_seconds"] > elapsed and
+                    row["uptime_ms"] > uptime and row["syscalls"] > syscalls and
+                    all(row[name] == baseline[name] for name in observed),
+                    f"soak round {index}: stalled workload or resource mismatch")
+            elapsed, uptime, syscalls = row["elapsed_seconds"], row["uptime_ms"], row["syscalls"]
+        require(elapsed >= 3600 and baseline["packets"] == baseline["journal_pending"] == 0 and
+                baseline["journal_capacity"] > 0, "soak did not quiesce")
+        require(file_hash(result_path("soak", "ethernet.pcap")) == result["pcap_sha256"] and
+                b"[PASSED]" in result_path("soak", "disk.log").read_bytes(), "missing soak wire or disk evidence")
+
     if acceptance["gates"]["A11"]["status"] == "passed":
         campaign = result_path("production-fuzz", "results.json")
         report = document(campaign)

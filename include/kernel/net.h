@@ -64,6 +64,7 @@ uint16_t net_checksum(const void *data, size_t length);
 uint16_t net_pseudo_checksum(uint32_t src_ip, uint32_t dst_ip, uint8_t proto, const void *payload, size_t length);
 
 /* Packet buffer management */
+uint64_t pbuf_live_count(void);
 pbuf_t *pbuf_alloc(size_t size);
 void    pbuf_ref(pbuf_t *p);
 void    pbuf_free(pbuf_t *p);

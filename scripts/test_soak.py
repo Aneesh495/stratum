@@ -26,13 +26,18 @@ PROGRESS = (b"[PASS] soak CPUs=0xff faults=256 processes=9 threads=32 "
 
 def observe(guest):
     reply = shell(guest, "sysinfo")
-    uptime, cpus, tasks, total, free, calls = (
-        int(re.search(label + rb":\s+(\d+)", reply)[1])
-        for label in (b"Uptime", b"Online CPUs", b"Processes", b"Total Memory", b"Free Memory", b"Syscalls")
-    )
-    if cpus != 8 or not 900000 <= total <= 1048576:
-        raise RuntimeError(f"wrong soak profile: {cpus} CPUs, {total} KiB")
-    return {"uptime_ms": uptime, "processes": tasks, "free_kib": free, "syscalls": calls}
+    labels = {
+        "uptime_ms": b"Uptime", "cpus": b"Online CPUs", "processes": b"Processes",
+        "total_kib": b"Total Memory", "free_kib": b"Free Memory", "syscalls": b"Syscalls",
+        "threads": b"Live Threads", "files": b"File Objects", "packets": b"Packet Buffers",
+        "journal_capacity": b"Journal Capacity", "journal_pending": b"Journal Pending",
+    }
+    stats = {key: int(re.search(label + rb":\s+(\d+)", reply)[1]) for key, label in labels.items()}
+    if stats["cpus"] != 8 or not 900000 <= stats["total_kib"] <= 1048576:
+        raise RuntimeError(f"wrong soak profile: {stats}")
+    if stats["packets"] or stats["journal_pending"] or not stats["journal_capacity"]:
+        raise RuntimeError(f"network or storage failed to quiesce: {stats}")
+    return stats
 
 
 def exercise(guest, peer, reader, digest):
@@ -86,7 +91,9 @@ def run(seconds, logs):
                     rounds += 1
                     journal.write(json.dumps({"round": rounds, "elapsed_seconds": elapsed, **current}) + "\n")
                     journal.flush()
-                    if (current["processes"], current["free_kib"]) != (baseline["processes"], baseline["free_kib"]):
+                    resources = ("processes", "free_kib", "threads", "files", "packets",
+                                 "journal_capacity", "journal_pending")
+                    if any(current[name] != baseline[name] for name in resources):
                         raise RuntimeError(f"resources changed after round {rounds}: {baseline} to {current}")
                     if current["uptime_ms"] <= last["uptime_ms"] or current["syscalls"] <= last["syscalls"]:
                         raise RuntimeError(f"guest counters stopped after round {rounds}")

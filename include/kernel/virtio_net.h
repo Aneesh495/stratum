@@ -54,6 +54,8 @@ typedef struct virtio_net_dev {
 } virtio_net_dev_t;
 
 int               virtio_net_init(void);
+uint64_t virtio_net_rx_irq_count(void);
+void virtio_net_wait_rx(virtio_net_dev_t *dev, uint64_t previous);
 virtio_net_dev_t *virtio_net_get_primary(void);
 int               virtio_net_transmit(virtio_net_dev_t *dev, const void *packet, size_t len);
 int               virtio_net_receive(virtio_net_dev_t *dev, void *buf, size_t max_len);

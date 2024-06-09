@@ -245,7 +245,7 @@ static int expand_link(vfs_node_t *node, const char *rest, char rewritten[VFS_MA
     if (!node->ops || !node->ops->readlink) return -STRATUM_EIO;
     int64_t length = node->ops->readlink(node, target, sizeof(target));
     if (length < 0) return (int)length;
-    if (!length || length >= sizeof(target) || target[0] != '/') return -STRATUM_EIO;
+    if (!length || (size_t)length >= sizeof(target) || target[0] != '/') return -STRATUM_EIO;
     for (int64_t i = 0; i < length; i++) if (!target[i]) return -STRATUM_EIO;
     size_t suffix = strlen(rest);
     if ((size_t)length + suffix >= VFS_MAX_PATH) return -STRATUM_ENAMETOOLONG;

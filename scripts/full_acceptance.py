@@ -1,5 +1,6 @@
 """Run the fixed Stratum workloads from a clean copy and retain partial evidence."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 import os
@@ -111,17 +112,38 @@ def run():
                        check=True, timeout=30)
         write(dest / "SOURCE_INPUTS.json", {"commit": commit, "tree": tree, "files": source_files(checkout)})
         write(dest / "ENVIRONMENT.json", environment())
-        with (dest / "COMMANDS.jsonl").open("w", encoding="utf-8") as history:
-            for name, (command, timeout, patterns) in RUNS.items():
-                if name not in ("image", "host", "documentation", "benchmarks", "wait-tlb-model", "wal-model",
-                                "production-fuzz", "regression") and results["image"]["exit"]:
-                    results[name] = {"name": name, "blocked_by": "image", "exit": None, "artifacts": []}
-                    continue
+        with ((dest / "COMMANDS.jsonl").open("w", encoding="utf-8") as history,
+              ThreadPoolExecutor(max_workers=1) as parallel):
+            def exercise(name):
+                command, timeout, patterns = RUNS[name]
                 row = execute(name, checkout, dest, command, timeout)
                 row["artifacts"] = preserve(checkout, dest, patterns)
+                return row
+
+            def record(name, row):
                 results[name] = row
                 history.write(json.dumps(row) + "\n")
                 history.flush()
+
+            def blocked(name):
+                results[name] = {"name": name, "blocked_by": "image", "exit": None, "artifacts": []}
+
+            record("image", exercise("image"))
+            image_failed = results["image"]["exit"] != 0
+            soak = None if image_failed else parallel.submit(exercise, "soak")
+            host_workloads = {"host", "documentation", "benchmarks", "wait-tlb-model", "wal-model",
+                              "production-fuzz", "regression"}
+            for name in RUNS:
+                if name in ("image", "soak"):
+                    continue
+                if image_failed and name not in host_workloads:
+                    blocked(name)
+                else:
+                    record(name, exercise(name))
+            if soak:
+                record("soak", soak.result())
+            else:
+                blocked("soak")
 
     gates = {}
     for gate, requirements in GATES.items():
@@ -132,7 +154,7 @@ def run():
         gates[gate] = {"status": status, "failed_workloads": failed, "blocked_workloads": blocked,
                        "required_workloads": requirements, "unverified_requirement": gap}
     features = {}
-    plan = root.joinpath("docs/ACCEPTANCE_PLAN.md").read_text()
+    plan = git(root, "show", f"{commit}:docs/ACCEPTANCE_PLAN.md").decode("utf-8")
     for identity, title, paths, verification in re.findall(r"^\| (K\d\d) \| ([^|]+) \| ([^|]+) \| ([^|]+) \|$", plan, re.M):
         features[identity] = {"feature": title, "declared_paths": paths, "verification": verification,
                               "status": "unverified"}

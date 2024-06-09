@@ -14,6 +14,8 @@
 #include <kernel/vfs.h>
 #include <kernel/socket.h>
 #include <kernel/virtio_net.h>
+#include <kernel/net.h>
+#include <kernel/stratafs.h>
 #include <kernel/trace.h>
 #include <kernel/pmm.h>
 #include <kernel/string.h>
@@ -497,6 +499,19 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
 
     case SYS_getcpu:
         return smp_get_cpu_id();
+
+    case SYS_resources: {
+        strat_resources_t resources = {
+            .threads = sched_live_threads(),
+            .file_objects = file_live_objects(),
+            .packet_buffers = pbuf_live_count(),
+        };
+        stratafs_journal_usage(&resources.journal_capacity, &resources.journal_pending);
+        return copy_to_user((void *)regs->rdi, &resources, sizeof(resources));
+    }
+
+    case SYS_net_rx_irqs:
+        return (int64_t)virtio_net_rx_irq_count();
 
     case SYS_net_queues: {
         virtio_net_dev_t *net = virtio_net_get_primary();

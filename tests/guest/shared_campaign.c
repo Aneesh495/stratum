@@ -2,6 +2,7 @@
 #include <user/strat_api.h>
 
 extern void u_printf(const char *, ...);
+extern int strcmp(const char *, const char *);
 
 #define PAGE 4096U
 #define CYCLES 2000U
@@ -72,7 +73,44 @@ static int last_owner(void) {
     return reap(child, 0);
 }
 
-int main(void) {
+static int exhaust_child(void) {
+    const size_t length = 2U * 1024U * 1024U;
+    void *mapped[16];
+    unsigned count = 0;
+    strat_sysinfo_t before, after;
+    for (; count < 16; count++) {
+        if (sysinfo(&before)) return 1;
+        int64_t addr = mmap_shared(length, RW);
+        if (addr == -STRATUM_ENOMEM) break;
+        if (addr < 0) return 2;
+        mapped[count] = (void *)(uintptr_t)addr;
+    }
+    if (!count || count == 16 || sysinfo(&after) || before.free_memory_bytes >= length ||
+        after.free_memory_bytes + 16 * PAGE < before.free_memory_bytes) return 3;
+    /* A failed partial allocation retains only bounded page table metadata. */
+    int64_t retry = mmap_shared(PAGE, RW);
+    if (retry < 0 || munmap((void *)(uintptr_t)retry, PAGE)) return 4;
+    for (unsigned i = 0; i < count; i++) if (munmap(mapped[i], length)) return 5;
+    u_printf("[EXHAUST] regions=%u free_before=%lu free_after=%lu\n", count,
+             before.free_memory_bytes, after.free_memory_bytes);
+    return 0;
+}
+
+static int exhaust(void) {
+    strat_sysinfo_t before, after;
+    if (sysinfo(&before)) return 1;
+    int child = fork();
+    if (child < 0) return 1;
+    if (!child) exit(exhaust_child());
+    if (reap(child, 0) || sysinfo(&after) || after.free_memory_bytes != before.free_memory_bytes ||
+        after.active_processes != before.active_processes) return 1;
+    u_printf("[PASS] allocator exhaustion, rollback, retry and final page recovery\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "exhaust")) return exhaust();
+    if (argc != 1) return 1;
     strat_sysinfo_t before, after;
     if (sysinfo(&before) || before.online_cpus < 2 || cycle(0, 1) || last_owner() ||
         sysinfo(&before)) return 1;

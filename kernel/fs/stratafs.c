@@ -1467,3 +1467,17 @@ int stratafs_init(void) {
 bool stratafs_is_mounted(void) {
     return g_stratafs_active;
 }
+
+void stratafs_journal_usage(uint32_t *capacity, uint32_t *pending) {
+    *capacity = 0;
+    *pending = 0;
+    if (!g_stratafs_active) return;
+    uint64_t flags;
+    spin_lock_irqsave(&g_stratafs.lock, &flags);
+    const journal_t *journal = &g_stratafs.journal;
+    if (journal->active && journal->block_count > 1) {
+        *capacity = journal->block_count - 1;
+        *pending = (journal->sb.tail_block + *capacity - journal->sb.head_block) % *capacity;
+    }
+    spin_unlock_irqrestore(&g_stratafs.lock, flags);
+}

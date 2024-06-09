@@ -1,4 +1,7 @@
 #include <kernel/virtio_net.h>
+#include <kernel/apic.h>
+#include <kernel/event.h>
+#include <kernel/idt.h>
 #include <kernel/pmm.h>
 #include <kernel/slab.h>
 #include <kernel/kernel.h>
@@ -8,6 +11,28 @@
 
 static virtio_net_dev_t g_primary_net;
 static bool             g_primary_net_registered = false;
+static uint64_t         rx_interrupts;
+
+static void receive_irq(interrupt_frame_t *frame) {
+    (void)frame;
+    uint64_t flags = event_lock();
+    __atomic_add_fetch(&rx_interrupts, 1, __ATOMIC_RELEASE);
+    event_wake_locked(&g_primary_net, 0, 1, 1, 0);
+    event_unlock(flags);
+}
+
+uint64_t virtio_net_rx_irq_count(void) {
+    return __atomic_load_n(&rx_interrupts, __ATOMIC_ACQUIRE);
+}
+
+void virtio_net_wait_rx(virtio_net_dev_t *dev, uint64_t previous) {
+    uint64_t flags = event_lock();
+    if (virtio_net_rx_irq_count() == previous) {
+        event_wait_locked(dev, 0, event_deadline(1), flags);
+    } else {
+        event_unlock(flags);
+    }
+}
 
 /* Modern virtio always includes num_buffers in its header. Legacy omits it
  * when the mergeable receive buffer feature is disabled. */
@@ -89,6 +114,10 @@ int virtio_net_init(void) {
         memset(rx_buf, 0, sizeof(virtio_net_rx_buf_t));
         dev->rx_pool[i] = rx_buf;
         virtio_net_enqueue_rx(dev, rx_buf);
+    }
+    register_interrupt_handler(VEC_VIRTIO_NET_RX, receive_irq);
+    if (virtio_queue_msix(&dev->vdev, 0, VEC_VIRTIO_NET_RX, (uint8_t)lapic_get_id())) {
+        kprintf("[VIRTIO-NET] MSI-X receive vector 0x%x.\n", VEC_VIRTIO_NET_RX);
     }
     /* Enable DMA only once all queues have been configured. */
     virtio_driver_ok(&dev->vdev);

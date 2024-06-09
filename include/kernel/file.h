@@ -57,6 +57,7 @@ typedef struct fd_table {
 } fd_table_t;
 
 void    file_init(void);
+uint64_t file_live_objects(void);
 file_t *file_alloc(file_type_t type, const file_ops_t *ops, void *priv);
 void    file_ref(file_t *f);
 void    file_close(file_t *f);

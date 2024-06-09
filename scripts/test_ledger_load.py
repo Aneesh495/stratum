@@ -56,8 +56,15 @@ class RecordImage:
                 return number
         raise RuntimeError(f"missing StrataFS directory entry {name!r}")
 
-    def ledger(self):
-        return self.inode_bytes(self.entry(self.entry(1, b"ledger"), b".records-v1"))
+    def file(self, name, *, optional=False):
+        directory = self.entry(1, b"ledger")
+        try:
+            number = self.entry(directory, name)
+        except RuntimeError:
+            if optional:
+                return None
+            raise
+        return self.inode_bytes(number)
 
 
 def expected_record(key):
@@ -74,7 +81,18 @@ def checksum(data):
 
 def check_records(path, keys, *, final=False):
     with path.open("rb") as disk:
-        data = RecordImage(disk).ledger()
+        image = RecordImage(disk)
+        data = image.file(b".records-v1")
+        checkpoint = image.file(b".checkpoint-v1", optional=not final)
+    if checkpoint is not None:
+        magic, prefix, covered, reserved = struct.unpack("<QQII", checkpoint)
+        if magic != 0x3154504b43475253 or reserved or not 1 <= covered <= len(data) // 160:
+            raise RuntimeError("invalid ledger checkpoint")
+        actual = 14695981039346656037
+        for byte in data[:covered * 160]:
+            actual = ((actual ^ byte) * 1099511628211) & 0xffffffffffffffff
+        if actual != prefix or (final and covered != len(keys)):
+            raise RuntimeError("checkpoint does not match the durable log prefix")
     if len(data) % 160:
         raise RuntimeError("ledger ended mid-record")
     records = {}

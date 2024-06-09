@@ -8,6 +8,12 @@ from vm import BOOT_IMAGE, command, running
 
 
 def main():
+    with running(command(BOOT_IMAGE, cpus=1, memory="64M"), Path("build/shared/exhaust.log")) as guest:
+        guest.expect(PROMPT)
+        guest.send(b"/bin/shared-campaign exhaust\r")
+        guest.expect("[PASS] allocator exhaustion, rollback, retry and final page recovery", timeout=60)
+        guest.expect(PROMPT)
+    print("[PASS] 64 MiB: real shared allocation exhaustion and rollback", flush=True)
     for cpus in (4, 8):
         with running(command(BOOT_IMAGE, cpus=cpus), Path(f"build/shared/{cpus}cpu.log")) as guest:
             guest.expect(PROMPT)

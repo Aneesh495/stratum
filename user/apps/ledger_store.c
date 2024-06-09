@@ -6,8 +6,14 @@
 extern size_t strlen(const char *);
 extern int strcmp(const char *, const char *);
 extern void *memcpy(void *, const void *, size_t);
+extern void u_dprintf(int, const char *, ...);
 
 #define LOG_PATH "/ledger/.records-v1"
+#define CHECKPOINT_PATH "/ledger/.checkpoint-v1"
+#define CHECKPOINT_TEMP "/ledger/.checkpoint-tmp"
+#define CHECKPOINT_INTERVAL 256U
+#define CHECKPOINT_MAGIC 0x3154504b43475253ULL
+#define PREFIX_SEED 14695981039346656037ULL
 #define LOG_LIMIT 16384U
 #define SLOT_COUNT (LOG_LIMIT * 2)
 
@@ -20,10 +26,21 @@ typedef struct {
 
 _Static_assert(sizeof(record_t) == 160, "ledger record size");
 
+typedef struct {
+    uint64_t magic;
+    uint64_t prefix;
+    uint32_t records;
+    uint32_t reserved;
+} checkpoint_t;
+
+_Static_assert(sizeof(checkpoint_t) == 24, "ledger checkpoint size");
+
 struct ledger_store {
     int fd;
     int failed;
     unsigned count;
+    unsigned checkpointed;
+    uint64_t prefix;
     uint32_t slots[SLOT_COUNT];
     record_t records[LOG_LIMIT];
 };
@@ -38,6 +55,49 @@ static uint32_t fingerprint(const void *data, size_t length) {
 static uint32_t checksum(const record_t *record) {
     const size_t offset = offsetof(record_t, id);
     return fingerprint((const uint8_t *)record + offset, sizeof(*record) - offset);
+}
+
+static uint64_t prefix_hash(uint64_t hash, const record_t *record) {
+    const uint8_t *bytes = (const uint8_t *)record;
+    for (size_t i = 0; i < sizeof(*record); i++) hash = (hash ^ bytes[i]) * 1099511628211ULL;
+    return hash;
+}
+
+static int read_checkpoint(checkpoint_t *checkpoint) {
+    int fd = open(CHECKPOINT_PATH, O_RDONLY, 0);
+    if (fd < 0) return fd == -STRATUM_ENOENT ? 0 : fd;
+    char extra;
+    int64_t length = read(fd, checkpoint, sizeof(*checkpoint));
+    int64_t tail = read(fd, &extra, 1);
+    close(fd);
+    if (length != sizeof(*checkpoint) || tail || checkpoint->magic != CHECKPOINT_MAGIC ||
+        !checkpoint->records || checkpoint->records > LOG_LIMIT || checkpoint->reserved) return -STRATUM_EIO;
+    return 0;
+}
+
+static int checkpoint_log(ledger_store_t *store) {
+    if (store->failed || store->count == store->checkpointed) return 0;
+    const checkpoint_t checkpoint = {
+        .magic = CHECKPOINT_MAGIC, .prefix = store->prefix, .records = store->count,
+    };
+    int fd = open(CHECKPOINT_TEMP, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    if (fd < 0) return fd;
+    int64_t length = write(fd, &checkpoint, sizeof(checkpoint));
+    int result = length == sizeof(checkpoint) ? fsync(fd) : (length < 0 ? (int)length : -STRATUM_EIO);
+    int closed = close(fd);
+    if (!result) result = closed;
+    if (!result) result = rename(CHECKPOINT_TEMP, CHECKPOINT_PATH);
+    if (result) {
+        unlink(CHECKPOINT_TEMP);
+        return result;
+    }
+    int parent = open("/ledger", O_RDONLY | O_DIRECTORY, 0);
+    if (parent < 0) return parent;
+    result = fsync(parent);
+    closed = close(parent);
+    if (!result) result = closed;
+    if (!result) store->checkpointed = store->count;
+    return result;
 }
 
 static int record_valid(const record_t *record) {
@@ -78,9 +138,11 @@ int ledger_store_open(ledger_store_t **out) {
     }
     ledger_store_t *store = (void *)(uintptr_t)address;
     store->fd = fd;
+    store->prefix = PREFIX_SEED;
+    checkpoint_t checkpoint = {0};
+    int result = read_checkpoint(&checkpoint);
     record_t record;
-    int result;
-    while ((result = next_record(fd, &record)) > 0) {
+    while (result >= 0 && (result = next_record(fd, &record)) > 0) {
         unsigned slot = index_slot(store, record.id);
         if (store->count == LOG_LIMIT || store->slots[slot]) {
             result = -STRATUM_EIO;
@@ -88,9 +150,19 @@ int ledger_store_open(ledger_store_t **out) {
         }
         store->records[store->count++] = record;
         store->slots[slot] = store->count;
+        store->prefix = prefix_hash(store->prefix, &record);
+        if (store->count == checkpoint.records) {
+            if (store->prefix != checkpoint.prefix) {
+                result = -STRATUM_EIO;
+                break;
+            }
+            store->checkpointed = store->count;
+        }
     }
+    if (!result && checkpoint.records > store->count) result = -STRATUM_EIO;
     if (result < 0) {
-        ledger_store_close(store);
+        close(fd);
+        munmap(store, sizeof(*store));
         return result;
     }
     *out = store;
@@ -98,9 +170,11 @@ int ledger_store_open(ledger_store_t **out) {
 }
 
 int ledger_store_close(ledger_store_t *store) {
-    int result = close(store->fd);
+    int result = checkpoint_log(store);
+    int closed = close(store->fd);
     int unmapped = munmap(store, sizeof(*store));
-    return result ? result : unmapped;
+    if (result) return result;
+    return closed ? closed : unmapped;
 }
 
 int ledger_store_get(const ledger_store_t *store, const char *id, char value[LEDGER_VALUE_SIZE]) {
@@ -155,5 +229,10 @@ int ledger_store_append(ledger_store_t *store, const char *id, const char *value
     }
     store->records[store->count++] = record;
     store->slots[slot] = store->count;
+    store->prefix = prefix_hash(store->prefix, &record);
+    if (store->count % CHECKPOINT_INTERVAL == 0) {
+        int checkpoint = checkpoint_log(store);
+        if (checkpoint) u_dprintf(2, "ledgerd: checkpoint update failed (err=%d)\n", checkpoint);
+    }
     return 0;
 }

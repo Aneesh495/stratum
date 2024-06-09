@@ -32,6 +32,7 @@ static int campaign(unsigned count, unsigned invalid) {
 
     strat_queue_stats_t before[2], after[2];
     if (strat_net_queues(before)) return 2;
+    uint64_t interrupts = strat_net_rx_irqs();
     u_printf("net-campaign: ready for %u datagrams\n", count);
     struct pollfd ready = { .fd = fd, .events = POLLIN };
     uint8_t payload[164];
@@ -63,6 +64,9 @@ static int campaign(unsigned count, unsigned invalid) {
         u_printf("[QUEUE] %s submitted=%u completed=%u available_wraps=%lu used_wraps=%lu free=%u capacity=%u\n",
                  i ? "tx" : "rx", expected, expected, available_wraps, used_wraps, a->free, a->capacity);
     }
+    uint64_t received_irqs = strat_net_rx_irqs() - interrupts;
+    u_printf("[IRQ] RX MSI-X completions=%lu\n", received_irqs);
+    if (!received_irqs) return 9;
     u_printf("[PASS] UDP echoes=%u exact payloads\n", count);
     return 0;
 }

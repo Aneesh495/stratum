@@ -71,6 +71,8 @@ typedef struct virtio_device {
     volatile virtio_pci_common_cfg_t *common_cfg;
     volatile uint8_t                *notify_base;
     uint32_t                         notify_mult;
+    uint32_t                         notify_length;
+    volatile uint16_t              *doorbells[VIRTIO_MAX_QUEUES];
     volatile uint8_t                *isr_cfg;
     void                            *device_cfg;
 
@@ -88,6 +90,7 @@ int          virtio_probe_device(pci_device_t *pci_dev, virtio_device_t *vdev);
 int          virtio_reset_device(virtio_device_t *vdev);
 int          virtio_negotiate_features(virtio_device_t *vdev, uint64_t required_features);
 virtqueue_t *virtio_setup_queue(virtio_device_t *vdev, uint16_t queue_idx);
+bool         virtio_queue_msix(virtio_device_t *vdev, uint16_t queue_idx, uint8_t vector, uint8_t apic_id);
 void         virtio_set_status(virtio_device_t *vdev, uint8_t status);
 uint8_t      virtio_get_status(virtio_device_t *vdev);
 void         virtio_driver_ok(virtio_device_t *vdev);

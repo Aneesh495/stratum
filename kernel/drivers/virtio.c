@@ -7,12 +7,7 @@
 
 static void virtio_notify_modern(void *ctx, uint16_t queue_idx) {
     virtio_device_t *vdev = (virtio_device_t *)ctx;
-    if (!vdev || !vdev->notify_base) return;
-
-    vdev->common_cfg->queue_select = queue_idx;
-    uint16_t notify_off = vdev->common_cfg->queue_notify_off;
-    volatile uint16_t *doorbell = (volatile uint16_t *)(vdev->notify_base + notify_off * vdev->notify_mult);
-    *doorbell = queue_idx;
+    *vdev->doorbells[queue_idx] = queue_idx;
 }
 
 static void virtio_notify_legacy(void *ctx, uint16_t queue_idx) {
@@ -53,20 +48,30 @@ int virtio_probe_device(pci_device_t *pci_dev, virtio_device_t *vdev) {
         if (cap->id != PCI_CAP_ID_VNDR) continue;
 
         uint8_t offset = cap->offset;
+        if (offset > 240) continue;
+        uint8_t length = pci_read_config8(pci_dev->bus, pci_dev->slot, pci_dev->func, (uint8_t)(offset + 2));
+        if (length < 16) continue;
         uint8_t cfg_type = pci_read_config8(pci_dev->bus, pci_dev->slot, pci_dev->func, (uint8_t)(offset + 3));
         uint8_t bar = pci_read_config8(pci_dev->bus, pci_dev->slot, pci_dev->func, (uint8_t)(offset + 4));
         uint32_t bar_offset = pci_read_config32(pci_dev->bus, pci_dev->slot, pci_dev->func, (uint8_t)(offset + 8));
 
         if (bar >= 6 || pci_dev->bars[bar].is_io || !pci_dev->bars[bar].base_virt) continue;
+        uint32_t bar_length = pci_read_config32(pci_dev->bus, pci_dev->slot, pci_dev->func, (uint8_t)(offset + 12));
+        if (!bar_length || bar_offset > pci_dev->bars[bar].size ||
+            bar_length > pci_dev->bars[bar].size - bar_offset) continue;
 
         uint8_t *bar_base = (uint8_t *)pci_dev->bars[bar].base_virt;
 
         switch (cfg_type) {
         case VIRTIO_PCI_CAP_COMMON_CFG:
-            vdev->common_cfg = (volatile virtio_pci_common_cfg_t *)(bar_base + bar_offset);
+            if (bar_length >= sizeof(*vdev->common_cfg)) {
+                vdev->common_cfg = (volatile virtio_pci_common_cfg_t *)(bar_base + bar_offset);
+            }
             break;
         case VIRTIO_PCI_CAP_NOTIFY_CFG:
+            if (length < 20 || offset > 236 || bar_length < sizeof(uint16_t)) break;
             vdev->notify_base = (volatile uint8_t *)(bar_base + bar_offset);
+            vdev->notify_length = bar_length;
             vdev->notify_mult = pci_read_config32(pci_dev->bus, pci_dev->slot, pci_dev->func, (uint8_t)(offset + 16));
             break;
         case VIRTIO_PCI_CAP_ISR_CFG:
@@ -111,6 +116,7 @@ int virtio_reset_device(virtio_device_t *vdev) {
     for (unsigned i = 0; i < VIRTIO_MAX_QUEUES; i++) {
         virtqueue_destroy(vdev->queues[i]);
         vdev->queues[i] = NULL;
+        vdev->doorbells[i] = NULL;
     }
     vdev->num_queues = 0;
     vdev->device_features = 0;
@@ -173,7 +179,8 @@ virtqueue_t *virtio_setup_queue(virtio_device_t *vdev, uint16_t queue_idx) {
     if (vdev->is_modern) {
         vdev->common_cfg->queue_select = queue_idx;
         queue_size = vdev->common_cfg->queue_size;
-        if (queue_size == 0) return NULL;
+        uint64_t offset = (uint64_t)vdev->common_cfg->queue_notify_off * vdev->notify_mult;
+        if (queue_size == 0 || offset > vdev->notify_length - sizeof(uint16_t)) return NULL;
 
         virtqueue_t *vq = virtqueue_create(queue_idx, queue_size, notify_fn, vdev);
         if (!vq) return NULL;
@@ -182,6 +189,7 @@ virtqueue_t *virtio_setup_queue(virtio_device_t *vdev, uint16_t queue_idx) {
         uint64_t driver_phys = vq->mem_phys + (uint64_t)((uint8_t *)vq->avail - (uint8_t *)vq->desc);
         uint64_t device_phys = vq->mem_phys + (uint64_t)((uint8_t *)vq->used - (uint8_t *)vq->desc);
 
+        vdev->doorbells[queue_idx] = (volatile uint16_t *)(vdev->notify_base + offset);
         vdev->common_cfg->queue_desc = desc_phys;
         vdev->common_cfg->queue_driver = driver_phys;
         vdev->common_cfg->queue_device = device_phys;
@@ -205,6 +213,16 @@ virtqueue_t *virtio_setup_queue(virtio_device_t *vdev, uint16_t queue_idx) {
         vdev->num_queues++;
         return vq;
     }
+}
+
+bool virtio_queue_msix(virtio_device_t *vdev, uint16_t queue_idx, uint8_t vector, uint8_t apic_id) {
+    if (!vdev->is_modern || queue_idx >= VIRTIO_MAX_QUEUES || !vdev->queues[queue_idx]) return false;
+    if (!pci_configure_msix(vdev->pci_dev, 0, vector, apic_id)) return false;
+    vdev->common_cfg->queue_select = queue_idx;
+    vdev->common_cfg->queue_msix_vector = 0;
+    if (vdev->common_cfg->queue_msix_vector == 0) return true;
+    pci_disable_msix(vdev->pci_dev);
+    return false;
 }
 
 void virtio_driver_ok(virtio_device_t *vdev) {
