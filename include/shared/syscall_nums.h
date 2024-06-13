@@ -16,6 +16,7 @@
 #define SYS_sched_yield     16
 #define SYS_getcpu          17
 #define SYS_fork_on_cpu     18
+#define SYS_thread_cancel   19
 
 #define SYS_mmap            20
 #define SYS_munmap          21
@@ -62,6 +63,12 @@
 #define SYS_net_queues      73
 #define SYS_net_rx_irqs     74
 #define SYS_resources       75
+#define SYS_fs_cache        76
+#define SYS_blk_irq_wakes   77
+#define SYS_trace_info      78
+#define SYS_trace_read      79
+
+#define STRAT_TRACE_USER_BASE         100
 
 #define STRAT_CHANNEL_MAX_MESSAGE     512
 #define STRAT_CHANNEL_QUEUE_CAPACITY  8
@@ -141,6 +148,26 @@ typedef struct strat_sysinfo {
     uint64_t free_memory_bytes;
     uint64_t total_syscalls;
 } strat_sysinfo_t;
+
+typedef struct strat_trace_info {
+    uint64_t first;
+    uint64_t next;
+    uint64_t lost;
+} strat_trace_info_t;
+
+typedef struct strat_trace_record {
+    uint64_t tsc;
+    uint32_t cpu;
+    uint32_t event;
+    uint64_t args[4];
+} strat_trace_record_t;
+
+typedef struct strat_cache_stats {
+    uint64_t hits;
+    uint64_t misses;
+    uint64_t evictions;
+    uint64_t invalidations;
+} strat_cache_stats_t;
 
 typedef struct strat_resources {
     uint64_t threads;

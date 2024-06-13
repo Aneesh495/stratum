@@ -1,4 +1,9 @@
 #include <kernel/virtio_blk.h>
+#include <kernel/apic.h>
+#include <kernel/event.h>
+#include <kernel/trace.h>
+#include <kernel/idt.h>
+#include <kernel/process.h>
 #include <kernel/pmm.h>
 #include <kernel/slab.h>
 #include <kernel/kernel.h>
@@ -8,6 +13,19 @@
 
 static virtio_blk_dev_t g_primary_blk;
 static bool             g_primary_blk_registered = false;
+static uint64_t         irq_wakes;
+
+static void block_irq(interrupt_frame_t *frame) {
+    (void)frame;
+    uint64_t flags = event_lock();
+    unsigned woke = event_wake_locked(&g_primary_blk, 0, 1, 1, 0);
+    if (woke) __atomic_add_fetch(&irq_wakes, woke, __ATOMIC_RELEASE);
+    event_unlock(flags);
+}
+
+uint64_t virtio_blk_irq_wakes(void) {
+    return __atomic_load_n(&irq_wakes, __ATOMIC_ACQUIRE);
+}
 
 static int configure_block(virtio_blk_dev_t *dev);
 static int reset_locked(virtio_blk_dev_t *dev);
@@ -21,6 +39,31 @@ virtio_blk_dev_t *virtio_blk_get_primary(void) {
 static virtio_blk_req_hdr_t request_header;
 static uint8_t request_status;
 static _Alignas(PAGE_SIZE) uint8_t request_data[PAGE_SIZE];
+
+static int wait_completion(virtio_blk_dev_t *dev, bool interrupts, uint32_t *length) {
+    if (interrupts) {
+        uint64_t deadline = event_deadline(2000);
+        for (;;) {
+            uint64_t flags = event_lock();
+            void *complete = virtqueue_get_buf(dev->vq, length);
+            bool failed = virtqueue_faulted(dev->vq);
+            if (complete || failed || timer_get_ticks() >= deadline) {
+                event_unlock(flags);
+                if (failed || (complete && complete != &request_header)) return -STRATUM_EIO;
+                return complete ? 0 : -STRATUM_ETIMEDOUT;
+            }
+            event_wait_uninterruptible(dev, 0, deadline, flags);
+        }
+    }
+    /* Bootstrap and the pre-scheduler driver probes run on the idle stack. */
+    for (uint64_t attempts = 0; attempts < 10000000ULL; attempts++) {
+        void *complete = virtqueue_get_buf(dev->vq, length);
+        if (complete) return complete == &request_header ? 0 : -STRATUM_EIO;
+        if (virtqueue_faulted(dev->vq)) return -STRATUM_EIO;
+        cpu_pause();
+    }
+    return -STRATUM_ETIMEDOUT;
+}
 
 static int64_t submit_request(virtio_blk_dev_t *dev, uint32_t type, uint64_t sector,
                               uint32_t bytes, void *buf) {
@@ -43,28 +86,24 @@ static int64_t submit_request(virtio_blk_dev_t *dev, uint32_t type, uint64_t sec
         .phys_addr = virt_to_phys(&request_status), .len = 1, .is_write = true,
     };
     in++;
+    bool interrupts = dev->irq_enabled && process_get_current();
+    dev->vq->avail->flags = interrupts ? 0 : VRING_AVAIL_F_NO_INTERRUPT;
     int res = virtqueue_add_buf(dev->vq, buffers, out, in, &request_header);
     if (res != 0) return res;
     virtqueue_kick(dev->vq);
 
-    for (uint64_t attempts = 0; attempts < 10000000ULL; attempts++) {
-        uint32_t used;
-        void *complete = virtqueue_get_buf(dev->vq, &used);
-        if (complete) {
-            if (complete != &request_header || request_status != VIRTIO_BLK_S_OK ||
-                used != (type == VIRTIO_BLK_T_IN ? bytes + 1 : 1)) return -STRATUM_EIO;
-            if (bytes && type == VIRTIO_BLK_T_IN) memcpy(buf, request_data, bytes);
-            return bytes;
-        }
-        if (virtqueue_faulted(dev->vq)) {
-            dev->failed = true;
-            return -STRATUM_EIO;
-        }
-        cpu_pause();
+    uint32_t used = 0;
+    res = wait_completion(dev, interrupts, &used);
+    trace_emit(TRACE_EVENT_BLOCK_IO, sector, bytes, type, (uint64_t)(int64_t)res);
+    if (res) {
+        dev->failed = true;
+        if (res == -STRATUM_ETIMEDOUT) kprintf("[VIRTIO-BLK] Request timed out at sector %lu.\n", sector);
+        return res;
     }
-    dev->failed = true;
-    kprintf("[VIRTIO-BLK] Request timed out at sector %lu.\n", sector);
-    return -STRATUM_ETIMEDOUT;
+    if (request_status != VIRTIO_BLK_S_OK ||
+        used != (type == VIRTIO_BLK_T_IN ? bytes + 1 : 1)) return -STRATUM_EIO;
+    if (bytes && type == VIRTIO_BLK_T_IN) memcpy(buf, request_data, bytes);
+    return bytes;
 }
 
 static int64_t virtio_blk_do_request(virtio_blk_dev_t *dev, uint32_t type,
@@ -72,8 +111,7 @@ static int64_t virtio_blk_do_request(virtio_blk_dev_t *dev, uint32_t type,
     if (!dev) return -STRATUM_EINVAL;
     if (type != VIRTIO_BLK_T_FLUSH && !count) return 0;
 
-    uint64_t flags;
-    spin_lock_irqsave(&dev->lock, &flags);
+    mutex_lock(&dev->lock);
     int error = 0;
     if (dev->failed || !dev->vq) error = -STRATUM_EIO;
     else if (type == VIRTIO_BLK_T_FLUSH) {
@@ -82,7 +120,7 @@ static int64_t virtio_blk_do_request(virtio_blk_dev_t *dev, uint32_t type,
         error = -STRATUM_EINVAL;
     } else if (type == VIRTIO_BLK_T_OUT && dev->read_only) error = -STRATUM_EROFS;
     if (error) {
-        spin_unlock_irqrestore(&dev->lock, flags);
+        mutex_unlock(&dev->lock);
         return error;
     }
     uint64_t completed = 0;
@@ -102,7 +140,7 @@ static int64_t virtio_blk_do_request(virtio_blk_dev_t *dev, uint32_t type,
         int reset = reset_locked(dev);
         if (reset) kprintf("[VIRTIO-BLK] Recovery failed: %d.\n", reset);
     }
-    spin_unlock_irqrestore(&dev->lock, flags);
+    mutex_unlock(&dev->lock);
     return completed ? (int64_t)completed : result;
 }
 
@@ -147,6 +185,8 @@ static int configure_block(virtio_blk_dev_t *dev) {
 
     dev->read_only = (dev->vdev.negotiated_features & VIRTIO_BLK_F_RO) != 0;
 
+    dev->irq_enabled = virtio_queue_msix(&dev->vdev, 0, VEC_VIRTIO_BLK, dev->irq_apic);
+    if (dev->irq_enabled) kprintf("[VIRTIO-BLK] MSI-X completion vector 0x%x.\n", VEC_VIRTIO_BLK);
     /* Mark driver as operational */
     virtio_driver_ok(&dev->vdev);
     return 0;
@@ -164,10 +204,9 @@ static int reset_locked(virtio_blk_dev_t *dev) {
 
 int virtio_blk_reset(virtio_blk_dev_t *dev) {
     if (!dev) return -STRATUM_EINVAL;
-    uint64_t flags;
-    spin_lock_irqsave(&dev->lock, &flags);
+    mutex_lock(&dev->lock);
     int res = reset_locked(dev);
-    spin_unlock_irqrestore(&dev->lock, flags);
+    mutex_unlock(&dev->lock);
     return res;
 }
 
@@ -184,7 +223,9 @@ int virtio_blk_init(void) {
 
     virtio_blk_dev_t *dev = &g_primary_blk;
     memset(dev, 0, sizeof(virtio_blk_dev_t));
-    spin_lock_init(&dev->lock);
+    mutex_init(&dev->lock);
+    dev->irq_apic = (uint8_t)lapic_get_id();
+    register_interrupt_handler(VEC_VIRTIO_BLK, block_irq);
 
     int res = virtio_probe_device(pci_dev, &dev->vdev);
     if (res != 0) {

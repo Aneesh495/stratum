@@ -15,13 +15,12 @@ static int64_t vfs_file_read(file_t *file, void *buf, size_t count) {
     vfs_node_t *node = (vfs_node_t *)file->priv;
     if (!node->ops || !node->ops->read) return -STRATUM_ENOSYS;
 
-    uint64_t flags;
-    spin_lock_irqsave(&file->lock, &flags);
+    mutex_lock(&file->lock);
     int64_t bytes = node->ops->read(node, file->offset, buf, count);
     if (bytes > 0) {
         file->offset += (uint64_t)bytes;
     }
-    spin_unlock_irqrestore(&file->lock, flags);
+    mutex_unlock(&file->lock);
     return bytes;
 }
 
@@ -32,14 +31,13 @@ static int64_t vfs_file_write(file_t *file, const void *buf, size_t count) {
     vfs_node_t *node = (vfs_node_t *)file->priv;
     if (!node->ops || !node->ops->write) return -STRATUM_ENOSYS;
 
-    uint64_t flags;
-    spin_lock_irqsave(&file->lock, &flags);
+    mutex_lock(&file->lock);
     bool append = (file->flags & O_APPEND) != 0;
     int64_t bytes = node->ops->write(node, append ? VFS_APPEND_OFFSET : file->offset, buf, count);
     if (bytes > 0) {
         file->offset = append ? node->size : file->offset + (uint64_t)bytes;
     }
-    spin_unlock_irqrestore(&file->lock, flags);
+    mutex_unlock(&file->lock);
     return bytes;
 }
 
@@ -400,8 +398,7 @@ int64_t vfs_lseek(file_t *file, int64_t offset, int whence) {
     if (!file || file->type != FILE_TYPE_VFS || !file->priv) return -STRATUM_EBADF;
     if (file->flags & O_DIRECTORY) return -STRATUM_ESPIPE;
 
-    uint64_t flags;
-    spin_lock_irqsave(&file->lock, &flags);
+    mutex_lock(&file->lock);
 
     int64_t base = 0;
     int res = 0;
@@ -427,12 +424,12 @@ int64_t vfs_lseek(file_t *file, int64_t offset, int whence) {
         res = -STRATUM_EINVAL;
     }
     if (res != 0) {
-        spin_unlock_irqrestore(&file->lock, flags);
+        mutex_unlock(&file->lock);
         return res;
     }
 
     file->offset = (uint64_t)new_off;
-    spin_unlock_irqrestore(&file->lock, flags);
+    mutex_unlock(&file->lock);
     return new_off;
 }
 

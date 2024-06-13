@@ -11,6 +11,7 @@
 /* Kernel console and printing */
 int kprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void kputs(const char *s);
+void kconsole_write(const char *bytes, size_t size, bool mirror);
 void kputchar(char c);
 
 /* Panic and assertion */

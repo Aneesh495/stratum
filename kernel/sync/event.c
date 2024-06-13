@@ -10,6 +10,7 @@ typedef struct event_waiter {
     uint64_t key;
     uint64_t deadline;
     int result;
+    bool interruptible;
 } event_waiter_t;
 
 static event_waiter_t *waiters;
@@ -48,15 +49,20 @@ uint64_t event_deadline(uint64_t timeout_ms) {
     return timer_get_ticks() + (timeout_ms + 9) / 10 + 1;
 }
 
-int event_wait_locked(const void *owner, uint64_t key, uint64_t deadline, uint64_t flags) {
+static int wait_event(const void *owner, uint64_t key, uint64_t deadline, uint64_t flags, bool interruptible) {
     event_waiter_t waiter = {
         .owner = owner,
         .thread = g_runqueues[smp_get_cpu_id()].current_thread,
         .key = key,
         .deadline = deadline,
+        .interruptible = interruptible,
     };
     event_waiter_t **link = &waiters;
     while (*link && (*link)->deadline <= deadline) link = &(*link)->next;
+    if (interruptible && waiter.thread->cancelled) {
+        event_unlock(flags);
+        return -STRATUM_EINTR;
+    }
     waiter.thread->state = THREAD_STATE_BLOCKED;
     waiter.next = *link;
     *link = &waiter;
@@ -64,6 +70,14 @@ int event_wait_locked(const void *owner, uint64_t key, uint64_t deadline, uint64
     sched_reschedule();
     local_irq_restore(flags);
     return waiter.result;
+}
+
+int event_wait_locked(const void *owner, uint64_t key, uint64_t deadline, uint64_t flags) {
+    return wait_event(owner, key, deadline, flags, true);
+}
+
+int event_wait_uninterruptible(const void *owner, uint64_t key, uint64_t deadline, uint64_t flags) {
+    return wait_event(owner, key, deadline, flags, false);
 }
 
 unsigned event_wake_locked(const void *owner, uint64_t start, uint64_t end, unsigned count, int result) {
@@ -82,6 +96,17 @@ unsigned event_wake_locked(const void *owner, uint64_t start, uint64_t end, unsi
     return woke;
 }
 
+void event_cancel(thread_t *thread) {
+    uint64_t flags = event_lock();
+    for (event_waiter_t **link = &waiters; *link; link = &(*link)->next) {
+        if ((*link)->thread == thread && (*link)->interruptible) {
+            complete(link, -STRATUM_EINTR);
+            break;
+        }
+    }
+    event_unlock(flags);
+}
+
 uint64_t readiness_generation(void) {
     return __atomic_load_n(&readiness, __ATOMIC_ACQUIRE);
 }
@@ -93,11 +118,11 @@ void readiness_notify(void) {
     event_unlock(flags);
 }
 
-void readiness_wait(uint64_t generation, uint64_t deadline) {
+int readiness_wait(uint64_t generation, uint64_t deadline) {
     uint64_t flags = event_lock();
     if (readiness_generation() == generation && timer_get_ticks() < deadline) {
-        event_wait_locked(&readiness, 0, deadline, flags);
-    } else {
-        event_unlock(flags);
+        return event_wait_locked(&readiness, 0, deadline, flags);
     }
+    event_unlock(flags);
+    return 0;
 }

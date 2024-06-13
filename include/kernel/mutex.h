@@ -1,17 +1,15 @@
 #ifndef STRATUM_KERNEL_MUTEX_H
 #define STRATUM_KERNEL_MUTEX_H
 
-#include <kernel/types.h>
-#include <kernel/spinlock.h>
+#include <kernel/sched.h>
 
 typedef struct mutex {
-    spinlock_t  lock;
-    volatile uint32_t state;     /* 0 = free, 1 = held */
-    void       *owner;           /* Owning thread pointer or CPU ID */
-    void       *wait_list;       /* Linked list of waiting threads */
+    spinlock_t guard;
+    wait_queue_t waiters;
+    bool held;
 } mutex_t;
 
-#define MUTEX_INIT ((mutex_t){SPINLOCK_INIT, 0, NULL, NULL})
+#define MUTEX_INIT ((mutex_t){ .guard = SPINLOCK_INIT, .waiters = { .lock = SPINLOCK_INIT } })
 
 void mutex_init(mutex_t *m);
 void mutex_lock(mutex_t *m);

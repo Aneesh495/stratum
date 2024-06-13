@@ -1,46 +1,38 @@
 #include <kernel/mutex.h>
-#include <kernel/x86_64.h>
 
 void mutex_init(mutex_t *m) {
-    if (!m) return;
-    spin_lock_init(&m->lock);
-    m->state = 0;
-    m->owner = NULL;
-    m->wait_list = NULL;
+    spin_lock_init(&m->guard);
+    wait_queue_init(&m->waiters);
+    m->held = false;
 }
 
 void mutex_lock(mutex_t *m) {
-    if (!m) return;
-    while (1) {
-        spin_lock(&m->lock);
-        if (m->state == 0) {
-            m->state = 1;
-            spin_unlock(&m->lock);
+    for (;;) {
+        uint64_t flags;
+        spin_lock_irqsave(&m->guard, &flags);
+        if (!m->held) {
+            m->held = true;
+            spin_unlock_irqrestore(&m->guard, flags);
             return;
         }
-        spin_unlock(&m->lock);
-        cpu_pause();
+        /* A cancelled task can still hold other mutexes while it unwinds. */
+        wait_queue_wait_uninterruptible(&m->waiters, &m->guard, flags);
     }
 }
 
 bool mutex_trylock(mutex_t *m) {
-    if (!m) return false;
-    if (!spin_trylock(&m->lock)) {
-        return false;
-    }
-    if (m->state == 0) {
-        m->state = 1;
-        spin_unlock(&m->lock);
-        return true;
-    }
-    spin_unlock(&m->lock);
-    return false;
+    uint64_t flags;
+    spin_lock_irqsave(&m->guard, &flags);
+    bool acquired = !m->held;
+    if (acquired) m->held = true;
+    spin_unlock_irqrestore(&m->guard, flags);
+    return acquired;
 }
 
 void mutex_unlock(mutex_t *m) {
-    if (!m) return;
-    spin_lock(&m->lock);
-    m->state = 0;
-    m->owner = NULL;
-    spin_unlock(&m->lock);
+    uint64_t flags;
+    spin_lock_irqsave(&m->guard, &flags);
+    m->held = false;
+    wait_queue_wake_one(&m->waiters);
+    spin_unlock_irqrestore(&m->guard, flags);
 }

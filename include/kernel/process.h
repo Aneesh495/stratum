@@ -33,6 +33,7 @@ typedef struct user_region {
 } user_region_t;
 
 typedef struct {
+    thread_t *thread;
     uint32_t tid;
     int status;
     bool finished;
@@ -52,6 +53,7 @@ typedef struct process {
     fd_table_t       fds;
     int              exit_code;
     bool             orphaned;
+    bool             exiting;
 
     struct process  *parent;
     struct process  *children;
@@ -69,6 +71,8 @@ process_t *process_create_init(user_program_t *prog);
 int        process_exec(const char *path, const char *const *argv, const char *const *envp);
 int32_t    process_fork(syscall_regs_t *regs, int fixed_cpu);
 void       process_exit(int status) __attribute__((noreturn));
+void       process_exit_thread(int status) __attribute__((noreturn));
+int        process_thread_cancel(uint64_t tid);
 void       process_finish_thread(process_t *proc, unsigned slot, int status);
 int64_t    process_thread_create(uint64_t trampoline, uint64_t entry, uint64_t arg, uint64_t fs_base);
 int        process_thread_join(uint64_t tid, int *status);

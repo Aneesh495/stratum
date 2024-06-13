@@ -39,6 +39,7 @@ def check(cpus):
         guest.send(b"/bin/thread-campaign population\r")
         result = guest.expect(PROMPT, timeout=180)
         switches = check_population(result, cpus)
+        require(b"Every runnable worker completed within 60000 guest milliseconds", result)
         guest.send(b"/bin/thread-campaign futex\r")
         require(b"[PASS] futex cases=10000 mismatch=2500 wake=2500 timeout=2500 unmap=2500",
                 guest.expect(PROMPT, timeout=180))

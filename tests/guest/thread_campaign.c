@@ -96,12 +96,13 @@ static int population_worker(void *arg) {
     char generation;
     if (read(gate_pipe[0], &generation, 1) != 1 || generation != 'G') return 2;
 
+    uint64_t started = uptime();
     uint64_t value = (uint64_t)record.pid << 32 | record.tid;
     xmm_write(value);
     for (unsigned i = 0; i < YIELDS_PER_WORKER; i++) {
         if (yield() || xmm_read() != value) return 3;
     }
-    return 73;
+    return uptime() - started <= 60000 ? 73 : 4;
 }
 
 static int populate_child(void) {
@@ -211,6 +212,7 @@ close_and_wait:
     }
     if (total < 1000000) return 1;
     u_printf("[PASS] distinct runnable user switches=%lu completed workers=%u\n", total, POPULATION);
+    u_printf("[PASS] Every runnable worker completed within 60000 guest milliseconds\n");
     return 0;
 }
 

@@ -262,14 +262,13 @@ static int64_t sys_readdir_impl(int fd, strat_dirent_t *user_entry) {
     }
 
     vfs_node_t *node = file->priv;
-    uint64_t flags;
-    spin_lock_irqsave(&file->lock, &flags);
+    mutex_lock(&file->lock);
     uint64_t offset = file->offset;
     strat_dirent_t entry = {0};
     int res = node->ops && node->ops->readdir ? node->ops->readdir(node, &offset, &entry) : -STRATUM_ENOSYS;
     if (res > 0 && copy_to_user(user_entry, &entry, sizeof(entry)) != 0) res = -STRATUM_EFAULT;
     if (res >= 0) file->offset = offset;
-    spin_unlock_irqrestore(&file->lock, flags);
+    mutex_unlock(&file->lock);
     file_close(file);
     return res;
 }
@@ -437,17 +436,19 @@ static int64_t sys_poll_impl(struct pollfd *u_fds, uint32_t nfds, int timeout_ms
 
         /* UART fallback is needed on platforms without a routable I/O APIC. */
         uint64_t wake_at = legacy_console && now + 1 < deadline ? now + 1 : deadline;
-        readiness_wait(generation, wake_at);
+        if (readiness_wait(generation, wake_at) == -STRATUM_EINTR) return -STRATUM_EINTR;
     }
 }
 
-int64_t syscall_dispatch(syscall_regs_t *regs) {
+static int64_t dispatch_syscall(syscall_regs_t *regs) {
     if (!regs) return -STRATUM_EINVAL;
 
     __atomic_add_fetch(&g_total_syscall_count, 1, __ATOMIC_RELAXED);
     uint64_t nr = regs->rax;
 
-    trace_emit(TRACE_EVENT_SYSCALL, nr, regs->rdi, regs->rsi, regs->rdx);
+    if (nr != SYS_trace_info && nr != SYS_trace_read && nr != SYS_trace_emit) {
+        trace_emit(TRACE_EVENT_SYSCALL, nr, regs->rdi, regs->rsi, regs->rdx);
+    }
 
     switch (nr) {
     case SYS_exit: {
@@ -479,7 +480,10 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
         return process_thread_create(regs->rdi, regs->rsi, regs->rdx, regs->r10);
 
     case SYS_thread_exit:
-        process_exit((int)regs->rdi);
+        process_exit_thread((int)regs->rdi);
+
+    case SYS_thread_cancel:
+        return process_thread_cancel(regs->rdi);
 
     case SYS_thread_join:
         return process_thread_join(regs->rdi, (int *)regs->rsi);
@@ -499,6 +503,15 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
 
     case SYS_getcpu:
         return smp_get_cpu_id();
+
+    case SYS_blk_irq_wakes:
+        return (int64_t)virtio_blk_irq_wakes();
+
+    case SYS_fs_cache: {
+        strat_cache_stats_t stats;
+        int result = stratafs_cache_snapshot(&stats);
+        return result ? result : copy_to_user((void *)regs->rdi, &stats, sizeof(stats));
+    }
 
     case SYS_resources: {
         strat_resources_t resources = {
@@ -658,7 +671,22 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
         return (int64_t)timer_get_uptime_ms();
     }
 
+    case SYS_trace_info: {
+        if (regs->rdi > UINT32_MAX) return -STRATUM_EINVAL;
+        strat_trace_info_t info;
+        int result = trace_info((uint32_t)regs->rdi, &info);
+        return result ? result : copy_to_user((void *)regs->rsi, &info, sizeof(info));
+    }
+
+    case SYS_trace_read: {
+        if (regs->rdi > UINT32_MAX) return -STRATUM_EINVAL;
+        strat_trace_record_t record;
+        int result = trace_read((uint32_t)regs->rdi, regs->rsi, &record);
+        return result ? result : copy_to_user((void *)regs->rdx, &record, sizeof(record));
+    }
+
     case SYS_trace_emit: {
+        if (regs->rdi < STRAT_TRACE_USER_BASE || regs->rdi > UINT32_MAX) return -STRATUM_EINVAL;
         trace_emit((uint32_t)regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8);
         return 0;
     }
@@ -670,4 +698,11 @@ int64_t syscall_dispatch(syscall_regs_t *regs) {
     default:
         return -STRATUM_ENOSYS;
     }
+}
+
+int64_t syscall_dispatch(syscall_regs_t *regs) {
+    if (thread_cancelled()) process_exit_thread(-STRATUM_EINTR);
+    int64_t result = dispatch_syscall(regs);
+    if (thread_cancelled()) process_exit_thread(-STRATUM_EINTR);
+    return result;
 }

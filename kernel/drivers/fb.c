@@ -209,7 +209,8 @@ static uint32_t  g_bg_color = 0x00101824; /* Dark blue/slate */
 #define CHAR_HEIGHT 16
 
 void fb_init(const boot_handoff_t *handoff) {
-    if (!handoff || handoff->fb_base_phys == 0) return;
+    if (!handoff || handoff->fb_base_phys == 0 ||
+        handoff->fb_width < CHAR_WIDTH || handoff->fb_height < CHAR_HEIGHT) return;
 
     /* In direct physical map (HHDM) */
     g_fb_base = (uint32_t *)phys_to_virt(handoff->fb_base_phys);
@@ -277,6 +278,14 @@ void fb_putchar(char c) {
 
     if (c == '\r') {
         g_cursor_x = 0;
+        return;
+    }
+
+    if (c == '\b') {
+        if (g_cursor_x >= CHAR_WIDTH) {
+            g_cursor_x -= CHAR_WIDTH;
+            fb_draw_char(g_cursor_x, g_cursor_y, ' ', g_fg_color, g_bg_color);
+        }
         return;
     }
 

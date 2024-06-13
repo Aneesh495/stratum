@@ -31,6 +31,20 @@ void timer_add_sleeper(thread_t *thread, uint32_t ms) {
     spin_unlock_irqrestore(&g_sleep_lock, flags);
 }
 
+void timer_cancel_sleeper(thread_t *thread) {
+    uint64_t flags;
+    spin_lock_irqsave(&g_sleep_lock, &flags);
+    for (thread_t **link = &g_sleep_queue; *link; link = &(*link)->next) {
+        if (*link == thread) {
+            *link = thread->next;
+            thread->next = NULL;
+            thread_wake(thread);
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_sleep_lock, flags);
+}
+
 void timer_check_sleepers(void) {
     uint64_t flags;
     spin_lock_irqsave(&g_sleep_lock, &flags);

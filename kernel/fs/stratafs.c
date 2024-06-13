@@ -1,4 +1,6 @@
 #include <kernel/stratafs.h>
+#include <kernel/boot.h>
+#include <kernel/smp.h>
 #include <kernel/slab.h>
 #include <kernel/kernel.h>
 #include <kernel/string.h>
@@ -20,17 +22,53 @@ static bool       g_stratafs_active = false;
 static vfs_node_t *stratafs_create_vfs_node(stratafs_t *fs, uint32_t ino, const stratafs_disk_inode_t *dinode, const char *name);
 extern const vfs_node_ops_t g_stratafs_node_ops;
 
+/* The filesystem lock covers cache and transaction ownership after mount. */
+static void invalidate_block(stratafs_t *fs, uint64_t block) {
+    if (!fs->cache_active) return;
+    for (unsigned i = 0; i < STRATAFS_CACHE_SLOTS; i++) {
+        stratafs_cache_entry_t *entry = &fs->cache[i];
+        if (entry->touched && entry->block == block) {
+            entry->touched = 0;
+            fs->cache_stats.invalidations++;
+            return;
+        }
+    }
+}
+
 int stratafs_read_block(stratafs_t *fs, uint64_t block_num, void *buf) {
     if (!fs || !fs->dev || !buf) return -STRATUM_EINVAL;
     if (block_num >= fs->dev->capacity_sectors / STRATAFS_SECTORS_PER_BLOCK) return -STRATUM_EIO;
+    stratafs_cache_entry_t *victim = NULL;
+    if (fs->cache_active) {
+        victim = &fs->cache[0];
+        for (unsigned i = 0; i < STRATAFS_CACHE_SLOTS; i++) {
+            stratafs_cache_entry_t *entry = &fs->cache[i];
+            if (entry->touched && entry->block == block_num) {
+                entry->touched = ++fs->cache_clock;
+                fs->cache_stats.hits++;
+                memcpy(buf, entry->data, STRATAFS_BLOCK_SIZE);
+                return 0;
+            }
+            if (entry->touched < victim->touched) victim = entry;
+        }
+        fs->cache_stats.misses++;
+    }
     uint64_t sector = block_num * STRATAFS_SECTORS_PER_BLOCK;
     int64_t rd = virtio_blk_read(fs->dev, sector, STRATAFS_SECTORS_PER_BLOCK, buf);
-    return (rd == STRATAFS_BLOCK_SIZE) ? 0 : -STRATUM_EIO;
+    if (rd != STRATAFS_BLOCK_SIZE) return -STRATUM_EIO;
+    if (victim) {
+        if (victim->touched) fs->cache_stats.evictions++;
+        memcpy(victim->data, buf, STRATAFS_BLOCK_SIZE);
+        victim->block = block_num;
+        victim->touched = ++fs->cache_clock;
+    }
+    return 0;
 }
 
 int stratafs_write_block(stratafs_t *fs, uint64_t block_num, const void *buf) {
     if (!fs || !fs->dev || !buf) return -STRATUM_EINVAL;
     if (block_num >= fs->dev->capacity_sectors / STRATAFS_SECTORS_PER_BLOCK) return -STRATUM_EIO;
+    invalidate_block(fs, block_num);
     uint64_t sector = block_num * STRATAFS_SECTORS_PER_BLOCK;
     int64_t wr = virtio_blk_write(fs->dev, sector, STRATAFS_SECTORS_PER_BLOCK, buf);
     return (wr == STRATAFS_BLOCK_SIZE) ? 0 : -STRATUM_EIO;
@@ -186,6 +224,12 @@ io_error:
 
 int stratafs_alloc_block(stratafs_t *fs, journal_tx_t *tx, uint32_t *out_block) {
     if (!fs || !out_block) return -STRATUM_EINVAL;
+
+    if (tx && fs->test_alloc_remaining && !--fs->test_alloc_remaining) {
+        kprintf("[STRATAFS] Test allocation failure: tx=%lu cpu=%u occurrence=2.\n",
+                tx->sequence_num, smp_get_cpu_id());
+        return -STRATUM_ENOSPC;
+    }
 
     uint8_t *bitmap = (uint8_t *)kmalloc(STRATAFS_BLOCK_SIZE);
     if (!bitmap) return -STRATUM_ENOMEM;
@@ -656,6 +700,7 @@ static int finish_tx(stratafs_t *fs, journal_tx_t *tx, int res) {
         return res;
     }
 
+    for (unsigned i = 0; i < tx->num_blocks; i++) invalidate_block(fs, tx->blocks[i].target_block);
     res = journal_commit(&fs->journal, tx);
     if (res == 0) {
         fs->sb.free_blocks = free_blocks;
@@ -673,8 +718,7 @@ static int load_node(stratafs_t *fs, const vfs_node_t *node, stratafs_disk_inode
 
 static int stratafs_vfs_lookup(vfs_node_t *parent, const char *name, vfs_node_t **out_child) {
     stratafs_t *fs = parent->mount->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     stratafs_disk_inode_t dir, inode;
     uint32_t ino;
     int res = load_node(fs, parent, &dir);
@@ -685,15 +729,14 @@ static int stratafs_vfs_lookup(vfs_node_t *parent, const char *name, vfs_node_t 
         *out_child = stratafs_create_vfs_node(fs, ino, &inode, name);
         if (!*out_child) res = -STRATUM_ENOMEM;
     }
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     return res;
 }
 
 static int create_entry(vfs_node_t *parent, const char *name, uint16_t mode,
                         const char *target, vfs_node_t **out_child) {
     stratafs_t *fs = parent->mount->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     stratafs_disk_inode_t dir, inode;
     journal_tx_t *tx = NULL;
     vfs_node_t *child = NULL;
@@ -753,7 +796,7 @@ static int create_entry(vfs_node_t *parent, const char *name, uint16_t mode,
     }
 out:
     res = finish_tx(fs, tx, res);
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     if (res == 0 && out_child) *out_child = child;
     else vfs_node_release(child);
     return res;
@@ -773,15 +816,14 @@ static int stratafs_vfs_symlink(vfs_node_t *parent, const char *name, const char
 
 static int64_t stratafs_vfs_readlink(vfs_node_t *node, char *out, size_t size) {
     stratafs_t *fs = node->mount->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     stratafs_disk_inode_t inode;
     int result = load_node(fs, node, &inode);
     if (!result && (disk_type(&inode) != STRATAFS_FT_SYMLINK || !inode.size || inode.size >= VFS_MAX_PATH)) {
         result = -STRATUM_EIO;
     }
     int64_t read = result ? result : stratafs_read_file(fs, &inode, 0, out, size);
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     return read;
 }
 
@@ -882,8 +924,7 @@ static int drop_inode_link(stratafs_t *fs, journal_tx_t *tx, uint32_t ino,
 
 static int stratafs_vfs_link(vfs_node_t *source, vfs_node_t *parent, const char *name) {
     stratafs_t *fs = parent->mount->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     stratafs_disk_inode_t inode, dir;
     journal_tx_t *tx = NULL;
     int result = load_node(fs, source, &inode);
@@ -907,14 +948,13 @@ static int stratafs_vfs_link(vfs_node_t *source, vfs_node_t *parent, const char 
         result = stratafs_write_inode(fs, tx, (uint32_t)source->inode_num, &inode);
     }
     result = finish_tx(fs, tx, result);
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     return result;
 }
 
 static int remove_node(vfs_node_t *parent, const char *name, bool directory) {
     stratafs_t *fs = parent->mount->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     stratafs_disk_inode_t dir, inode;
     uint32_t ino = 0;
     uint32_t parent_ino = (uint32_t)parent->inode_num;
@@ -934,7 +974,7 @@ static int remove_node(vfs_node_t *parent, const char *name, bool directory) {
     if (res == 0) res = drop_inode_link(fs, tx, ino, &inode);
     res = finish_tx(fs, tx, res);
     if (!res && (inode.flags & STRATAFS_INODE_ORPHAN)) fs->orphaned[ino] = true;
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     return res;
 }
 
@@ -981,8 +1021,7 @@ static int rewrite_dotdot(stratafs_t *fs, journal_tx_t *tx, stratafs_disk_inode_
 static int stratafs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
                                vfs_node_t *new_parent, const char *new_name) {
     stratafs_t *fs = old_parent->mount->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
 
     stratafs_disk_inode_t old_dir, new_dir, source, replaced;
     uint32_t old_ino = (uint32_t)old_parent->inode_num;
@@ -1061,14 +1100,13 @@ static int stratafs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
 out:
     res = finish_tx(fs, tx, res);
     if (!res && defer_replaced) fs->orphaned[dst] = true;
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     return res;
 }
 
 static int stratafs_vfs_readdir(vfs_node_t *node, uint64_t *index, vfs_dirent_t *entry) {
     stratafs_t *fs = node->mount->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     stratafs_disk_inode_t inode;
     int res = load_node(fs, node, &inode);
     if (res == 0 && !is_directory(&inode)) res = -STRATUM_ENOTDIR;
@@ -1103,14 +1141,13 @@ static int stratafs_vfs_readdir(vfs_node_t *node, uint64_t *index, vfs_dirent_t 
         } while (*index % slots != 0);
     }
     kfree(entries);
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     return res;
 }
 
 static int stratafs_vfs_open(vfs_node_t *node, uint32_t open_flags) {
     stratafs_t *fs = node->mount->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     stratafs_disk_inode_t inode;
     int res = load_node(fs, node, &inode);
     if (!res && !inode.nlink) res = -STRATUM_ENOENT;
@@ -1126,7 +1163,7 @@ static int stratafs_vfs_open(vfs_node_t *node, uint32_t open_flags) {
         fs->open_count[node->inode_num]++;
         node->size = inode.size;
     }
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     return res;
 }
 
@@ -1142,8 +1179,7 @@ static int reclaim_orphan(stratafs_t *fs, uint32_t ino, stratafs_disk_inode_t *i
 
 static int stratafs_vfs_close(vfs_node_t *node) {
     stratafs_t *fs = node->mount->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     uint32_t ino = (uint32_t)node->inode_num;
     int result = 0;
     if (!--fs->open_count[ino] && fs->orphaned[ino]) {
@@ -1153,25 +1189,23 @@ static int stratafs_vfs_close(vfs_node_t *node) {
         if (!result) fs->orphaned[ino] = false;
         else kprintf("[STRATAFS] Orphan inode %u remains for mount recovery (%d).\n", ino, result);
     }
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     return result;
 }
 
 static int64_t stratafs_vfs_read(vfs_node_t *node, uint64_t offset, void *buf, size_t count) {
     stratafs_t *fs = node->mount->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     stratafs_disk_inode_t inode;
     int res = load_node(fs, node, &inode);
     int64_t read = res ? res : stratafs_read_file(fs, &inode, offset, buf, count);
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     return read;
 }
 
 static int64_t stratafs_vfs_write(vfs_node_t *node, uint64_t offset, const void *buf, size_t count) {
     stratafs_t *fs = node->mount->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     stratafs_disk_inode_t inode;
     journal_tx_t *tx = NULL;
     int res = load_node(fs, node, &inode);
@@ -1181,17 +1215,16 @@ static int64_t stratafs_vfs_write(vfs_node_t *node, uint64_t offset, const void 
                                                       offset, buf, count);
     res = finish_tx(fs, tx, written < 0 ? (int)written : 0);
     if (res == 0 && written > 0) node->size = inode.size;
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     return res ? res : written;
 }
 
 static int stratafs_vfs_stat(vfs_node_t *node, vfs_stat_t *out_st) {
     stratafs_t *fs = (stratafs_t *)node->mount->fs_priv;
     stratafs_disk_inode_t dinode;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     int res = load_node(fs, node, &dinode);
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     if (res != 0) return res;
 
     memset(out_st, 0, sizeof(vfs_stat_t));
@@ -1211,10 +1244,9 @@ static int stratafs_vfs_stat(vfs_node_t *node, vfs_stat_t *out_st) {
 
 static int stratafs_vfs_sync(vfs_node_t *node) {
     stratafs_t *fs = (stratafs_t *)node->mount->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     int res = journal_checkpoint(&fs->journal);
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     return res;
 }
 
@@ -1371,7 +1403,7 @@ int stratafs_mount_fs(vfs_mount_t *mnt, const char *dev_name) {
     stratafs_t *fs = &g_stratafs;
     memset(fs, 0, sizeof(stratafs_t));
     fs->dev = blk;
-    spin_lock_init(&fs->lock);
+    mutex_init(&fs->lock);
     fs->mount = mnt;
 
     int res = stratafs_read_block(fs, 1, &fs->sb);
@@ -1417,6 +1449,8 @@ int stratafs_mount_fs(vfs_mount_t *mnt, const char *dev_name) {
     root_node->mount = mnt;
     mnt->root_node = root_node;
     mnt->fs_priv = fs;
+    fs->cache_active = true;
+    if (!strcmp(g_boot_handoff.cmdline, "storage=alloc-fail\n")) fs->test_alloc_remaining = 2;
     g_stratafs_active = true;
 
     kprintf("[STRATAFS] Mounted StrataFS on '%s' (%lu MiB volume, %u free blocks)\n",
@@ -1440,10 +1474,9 @@ static int stratafs_unmount_op(vfs_mount_t *mnt) {
 static int stratafs_sync_op(vfs_mount_t *mnt) {
     if (!mnt || !mnt->fs_priv) return -STRATUM_EINVAL;
     stratafs_t *fs = (stratafs_t *)mnt->fs_priv;
-    uint64_t flags;
-    spin_lock_irqsave(&fs->lock, &flags);
+    mutex_lock(&fs->lock);
     int res = journal_checkpoint(&fs->journal);
-    spin_unlock_irqrestore(&fs->lock, flags);
+    mutex_unlock(&fs->lock);
     return res;
 }
 
@@ -1472,12 +1505,19 @@ void stratafs_journal_usage(uint32_t *capacity, uint32_t *pending) {
     *capacity = 0;
     *pending = 0;
     if (!g_stratafs_active) return;
-    uint64_t flags;
-    spin_lock_irqsave(&g_stratafs.lock, &flags);
+    mutex_lock(&g_stratafs.lock);
     const journal_t *journal = &g_stratafs.journal;
     if (journal->active && journal->block_count > 1) {
         *capacity = journal->block_count - 1;
         *pending = (journal->sb.tail_block + *capacity - journal->sb.head_block) % *capacity;
     }
-    spin_unlock_irqrestore(&g_stratafs.lock, flags);
+    mutex_unlock(&g_stratafs.lock);
+}
+
+int stratafs_cache_snapshot(strat_cache_stats_t *stats) {
+    if (!g_stratafs_active) return -STRATUM_ENODEV;
+    mutex_lock(&g_stratafs.lock);
+    *stats = g_stratafs.cache_stats;
+    mutex_unlock(&g_stratafs.lock);
+    return 0;
 }

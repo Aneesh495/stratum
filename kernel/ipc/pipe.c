@@ -53,7 +53,8 @@ static int64_t pipe_read_op(file_t *file, void *buf, size_t count) {
         }
 
         /* Block on read wait queue */
-        wait_queue_wait_locked(&pipe->read_wait, &pipe->lock, flags);
+        int result = wait_queue_wait_locked(&pipe->read_wait, &pipe->lock, flags);
+        if (result) return bytes_read ? (int64_t)bytes_read : result;
     }
 
     return (int64_t)bytes_read;
@@ -102,7 +103,8 @@ static int64_t pipe_write_op(file_t *file, const void *buf, size_t count) {
         }
 
         /* Block on write wait queue */
-        wait_queue_wait_locked(&pipe->write_wait, &pipe->lock, flags);
+        int result = wait_queue_wait_locked(&pipe->write_wait, &pipe->lock, flags);
+        if (result) return bytes_written ? (int64_t)bytes_written : result;
     }
 
     return (int64_t)bytes_written;

@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <kernel/spinlock.h>
+#include <kernel/mutex.h>
 
 #define PROCESS_MAX_FDS 64
 
@@ -46,7 +47,7 @@ typedef struct file {
     volatile uint32_t refcount;
     uint32_t          flags;
     uint64_t          offset;
-    spinlock_t        lock;
+    mutex_t           lock;
 } file_t;
 
 typedef struct fd_table {
@@ -57,6 +58,7 @@ typedef struct fd_table {
 } fd_table_t;
 
 void    file_init(void);
+void    file_console_mirror(void);
 uint64_t file_live_objects(void);
 file_t *file_alloc(file_type_t type, const file_ops_t *ops, void *priv);
 void    file_ref(file_t *f);

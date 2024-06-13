@@ -20,6 +20,17 @@ void kputs(const char *s) {
 
 static spinlock_t g_kprintf_lock = SPINLOCK_INIT;
 
+void kconsole_write(const char *bytes, size_t size, bool mirror) {
+    uint64_t flags;
+    spin_lock_irqsave(&g_kprintf_lock, &flags);
+    if (mirror) {
+        for (size_t i = 0; i < size; i++) kputchar(bytes[i]);
+    } else {
+        uart_write(bytes, size);
+    }
+    spin_unlock_irqrestore(&g_kprintf_lock, flags);
+}
+
 int kprintf(const char *fmt, ...) {
     char buf[1024];
     va_list ap;
