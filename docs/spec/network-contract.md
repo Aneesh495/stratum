@@ -9,14 +9,18 @@ address for isolated Ethernet links.
 
 The stack implements Ethernet II, ARP, local IPv4 demultiplexing, ICMP echo
 replies, bounded UDP receive queues, and a small TCP stream implementation.
-IPv4 fragments are rejected. TCP uses one outstanding segment per stream,
-a receive window, and bounded retransmission. DHCP, IPv6, SACK, congestion
-control, and comprehensive TCP interoperability remain open.
+IPv4 fragments are rejected. TCP tracks up to four transmitted segments and
+reassembles reordered bytes within its 16 KiB receive window. Cumulative ACKs
+retire transmit slots. Three duplicate ACKs trigger fast retransmission. The
+bounded send window grows on acknowledged segments, shrinks on fast
+retransmit, and drops to one segment after a timeout. The timeout starts at
+250 ms and backs off through six retries. DHCP, IPv6, SACK, adaptive RTT
+estimation, and comprehensive protocol conformance are outside this profile.
 
 Native sockets are nonblocking and use negative Stratum errno values.
 `poll` reports readiness. TCP `connect` can return `EAGAIN` while the
 handshake is pending. `shutdown(SHUT_WR)` can return `EAGAIN` while an
-outstanding segment is awaiting acknowledgment.
+transmit window has no room for FIN.
 
 ## Record protocol
 
@@ -60,3 +64,11 @@ The host-client smoke test uses QEMU user networking. The two-guest test
 forwards Ethernet frames over an isolated QEMU socket link and independently
 checks the request and response bytes in a packet capture. The relay drops the
 first application reply, and the capture must show the retransmitted segment.
+
+
+`make test-tcp-reference` boots a pinned Alpine Linux guest on the isolated
+Ethernet link and reconstructs 32 exact streams from the capture. Set
+`STRATUM_REFERENCE_ISO` to the absolute path to
+`alpine-virt-3.22.8-x86_64.iso`. The runner verifies the image checksum before
+using it. It needs Zig for a static Linux test client and a tar implementation
+that reads ISO9660, such as bsdtar. [Alpine release archive](https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/)

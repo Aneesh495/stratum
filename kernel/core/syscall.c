@@ -15,6 +15,7 @@
 #include <kernel/socket.h>
 #include <kernel/virtio_net.h>
 #include <kernel/net.h>
+#include <kernel/tcp.h>
 #include <kernel/stratafs.h>
 #include <kernel/trace.h>
 #include <kernel/pmm.h>
@@ -522,6 +523,9 @@ static int64_t dispatch_syscall(syscall_regs_t *regs) {
         stratafs_journal_usage(&resources.journal_capacity, &resources.journal_pending);
         return copy_to_user((void *)regs->rdi, &resources, sizeof(resources));
     }
+
+    case SYS_tcp_recovery:
+        return (int64_t)tcp_fast_retransmits();
 
     case SYS_net_rx_irqs:
         return (int64_t)virtio_net_rx_irq_count();

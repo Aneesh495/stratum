@@ -67,6 +67,7 @@
 #define SYS_blk_irq_wakes   77
 #define SYS_trace_info      78
 #define SYS_trace_read      79
+#define SYS_tcp_recovery    80
 
 #define STRAT_TRACE_USER_BASE         100
 
