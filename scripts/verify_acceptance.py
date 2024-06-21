@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 import subprocess
 
+from acceptance_features import feature_rows
 from acceptance_schema import GAPS, GATES, RUNS, SCHEMA
 from evidence_format import file_hash
 
@@ -24,7 +25,7 @@ def git(*args):
     return subprocess.check_output(["git", *args], timeout=30).rstrip(b"\n")
 
 
-def verify(root):
+def verify(root, *, require_complete=True):
     manifest = document(root / "MANIFEST.json")
     require(manifest["schema"] == SCHEMA, "unsupported acceptance manifest schema")
     require(not git("status", "--porcelain"), "current source tree is dirty")
@@ -79,6 +80,10 @@ def verify(root):
     require(acceptance["gates"].keys() == GATES.keys(), "missing or extra fixed gates")
     features = document(root / "features.json")
     require(features.keys() == {f"K{i:02d}" for i in range(1, 65)}, "missing or extra capabilities")
+    plan = Path("docs/ACCEPTANCE_PLAN.md").read_text(encoding="utf-8")
+    require(features == feature_rows(plan, workloads, commit), "capability evidence mismatch")
+    require(all(path in tracked for row in features.values() for path in row["source_paths"]),
+            "capability points to untracked source")
     for gate, expected in GATES.items():
         row = acceptance["gates"][gate]
         failures = [name for name in expected if workloads[name]["exit"] not in (0, None)]
@@ -91,6 +96,10 @@ def verify(root):
         matches = [root / path for path in workloads[workload]["artifacts"] if Path(path).name == filename]
         require(len(matches) == 1, f"{workload}: missing or ambiguous {filename}")
         return matches[0]
+
+    from verify_fixed import verify as verify_fixed
+
+    verify_fixed(root, acceptance["gates"], result_path, document, require)
 
     if acceptance["gates"]["A01"]["status"] == "passed":
         boot_path = result_path("boot", "results.json")
@@ -183,7 +192,40 @@ def verify(root):
             executions += row["executions"]
         require(executions == report["total_executions"] and executions >= 2000000, "fuzz execution total mismatch")
 
-    require(acceptance["result"] == "passed" and
-            all(row["status"] == "passed" for row in acceptance["gates"].values()) and
-            all(row["status"] == "passed" for row in features.values()),
-            "bundle integrity checked, but required acceptance coverage remains incomplete")
+    if workloads["guest-bench"]["exit"] == 0:
+        from test_guest_bench import parse_samples
+        from test_tcp_campaign import verify_wire
+
+        benchmarks = document(result_path("guest-bench", "samples.json"))
+        require(benchmarks["inputs"] == {
+            "boot": file_hash(result_path("image", "stratum-boot.img")),
+            "disk": file_hash(result_path("image", "stratum-data.img")),
+            "firmware": environment["firmware_sha256"],
+            "workload": inputs["files"]["tests/guest/bench_campaign.c"],
+        }, "benchmark input hash mismatch")
+        require(benchmarks["profiles"].keys() == {"1", "4"}, "missing benchmark CPU profile")
+        for cpus, sample in benchmarks["profiles"].items():
+            observed = parse_samples(result_path("guest-bench", f"{cpus}cpu-boot-31.log").read_bytes())
+            require(observed == sample["guest_tsc_ticks"], "missing or changed guest benchmark samples")
+            require(len(sample["host_boot_ns"]) == 30 and all(
+                type(value) is int and value > 0 for value in sample["host_boot_ns"]
+            ), "missing host boot samples")
+            for run in range(32):
+                require(b"stratum> " in result_path("guest-bench", f"{cpus}cpu-boot-{run:02d}.log").read_bytes(),
+                        "benchmark boot transcript missing shell")
+            tcp = sample["tcp"]
+            pcap = result_path("guest-bench", f"{cpus}cpu-tcp.pcap")
+            require(tcp["bytes_each"] == 262144 and len(tcp["samples_ns"]) == 10 and
+                    all(type(value) is int and value > 0 for value in tcp["samples_ns"]) and
+                    file_hash(pcap) == tcp["pcap_sha256"] and
+                    verify_wire(pcap, 12, 131072) == tcp["wire_payload_sha256"],
+                    "missing or changed TCP benchmark samples")
+
+    statuses = [row["status"] for row in (*acceptance["gates"].values(), *features.values())]
+    counts = {key: statuses.count(key) for key in ("passed", "failed", "blocked", "unverified", "skipped")}
+    complete = counts["passed"] == len(statuses)
+    require(acceptance["counts"] == counts and acceptance["result"] == ("passed" if complete else "incomplete"),
+            "acceptance summary contradicts the recorded results")
+    if require_complete:
+        require(complete, "bundle integrity checked, but required acceptance coverage remains incomplete")
+    return complete

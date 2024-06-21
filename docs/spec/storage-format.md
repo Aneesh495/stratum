@@ -44,3 +44,16 @@ that six deliberately corrupted copies are rejected. The separate WAL
 model exercises 5,000 simulated crash states and 1,500 corrupted states.
 
 `make test-storage-namespace` checks directory moves, link identity, bounded symbolic links, and open-unlinked files across guest interruptions.
+
+
+## Caching and temporary files
+
+StrataFS caches up to 16 clean disk blocks with LRU eviction. Journal
+payloads own modified copies until commit. Home writes invalidate cached
+blocks under the filesystem mutex. A timed-out block request reports an
+error after reset acknowledgment. The caller owns retry policy.
+
+The volatile mount at `/tmp` supports directories, sparse regular files,
+rename and open-unlinked handles. It allows 128 objects, at most 16
+pages per file and 256 allocated data pages across the mount. Reboot
+clears it. Hard and symbolic links are supported by StrataFS.

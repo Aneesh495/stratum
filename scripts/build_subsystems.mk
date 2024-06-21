@@ -145,7 +145,7 @@ $(BUILD_DIR)/user/init_test.o: tests/guest/init.c scripts/build_subsystems.mk
 $(BUILD_DIR)/user_init.elf: $(USER_LIB_OBJS) $(BUILD_DIR)/user/apps/sh.o $(BUILD_DIR)/user/apps/ledgerd.o $(BUILD_DIR)/user/apps/ledger_store.o $(BUILD_DIR)/user/apps/init.o user/lib/user.ld
 	$(LD_LLD) $(USER_LDFLAGS) -o $@ $(filter %.o,$^)
 
-.SECONDARY: $(BUILD_DIR)/user/exec_campaign.o $(BUILD_DIR)/user/thread_campaign.o $(BUILD_DIR)/user/ipc_campaign.o $(BUILD_DIR)/user/fs_campaign.o $(BUILD_DIR)/user/net_campaign.o $(BUILD_DIR)/user/soak_campaign.o $(BUILD_DIR)/user/ledger_campaign.o $(BUILD_DIR)/user/tcp_campaign.o $(BUILD_DIR)/user/shared_campaign.o $(BUILD_DIR)/user/cancel_campaign.o $(BUILD_DIR)/user/trace_campaign.o
+.SECONDARY: $(BUILD_DIR)/user/exec_campaign.o $(BUILD_DIR)/user/thread_campaign.o $(BUILD_DIR)/user/ipc_campaign.o $(BUILD_DIR)/user/fs_campaign.o $(BUILD_DIR)/user/net_campaign.o $(BUILD_DIR)/user/soak_campaign.o $(BUILD_DIR)/user/ledger_campaign.o $(BUILD_DIR)/user/tcp_campaign.o $(BUILD_DIR)/user/shared_campaign.o $(BUILD_DIR)/user/cancel_campaign.o $(BUILD_DIR)/user/trace_campaign.o $(BUILD_DIR)/user/bench_campaign.o
 $(BUILD_DIR)/user/%_campaign.o: tests/guest/%_campaign.c scripts/build_subsystems.mk
 	@mkdir -p $(dir $@)
 	$(CLANG) $(USER_CFLAGS) -MMD -MP -c $< -o $@
@@ -186,7 +186,7 @@ $(BUILD_DIR)/stratum.elf: $(BUILD_DIR)/user_init.elf $(KERNEL_OBJS) kernel/arch/
 # Build Minimal Initramfs
 build-initramfs: $(BUILD_DIR)/initramfs.cpio
 
-$(BUILD_DIR)/initramfs.cpio: $(BUILD_DIR)/user_init.elf $(BUILD_DIR)/user_tools.elf $(BUILD_DIR)/user_exec_campaign.elf $(BUILD_DIR)/user_thread_campaign.elf $(BUILD_DIR)/user_ipc_campaign.elf $(BUILD_DIR)/user_fs_campaign.elf $(BUILD_DIR)/user_net_campaign.elf $(BUILD_DIR)/user_soak_campaign.elf $(BUILD_DIR)/user_ledger_campaign.elf $(BUILD_DIR)/user_tcp_campaign.elf $(BUILD_DIR)/user_shared_campaign.elf $(BUILD_DIR)/user_cancel_campaign.elf $(BUILD_DIR)/user_trace_campaign.elf scripts/build_cpio.py
+$(BUILD_DIR)/initramfs.cpio: $(BUILD_DIR)/user_init.elf $(BUILD_DIR)/user_tools.elf $(BUILD_DIR)/user_exec_campaign.elf $(BUILD_DIR)/user_thread_campaign.elf $(BUILD_DIR)/user_ipc_campaign.elf $(BUILD_DIR)/user_fs_campaign.elf $(BUILD_DIR)/user_net_campaign.elf $(BUILD_DIR)/user_soak_campaign.elf $(BUILD_DIR)/user_ledger_campaign.elf $(BUILD_DIR)/user_tcp_campaign.elf $(BUILD_DIR)/user_shared_campaign.elf $(BUILD_DIR)/user_cancel_campaign.elf $(BUILD_DIR)/user_trace_campaign.elf $(BUILD_DIR)/user_bench_campaign.elf scripts/build_cpio.py
 	@mkdir -p $(BUILD_DIR)
 	@$(PYTHON) scripts/build_cpio.py $< $@ true=$(BUILD_DIR)/user_tools.elf \
 		upper=$(BUILD_DIR)/user_tools.elf cp=$(BUILD_DIR)/user_tools.elf sha256sum=$(BUILD_DIR)/user_tools.elf exec-campaign=$(BUILD_DIR)/user_exec_campaign.elf \
@@ -196,9 +196,9 @@ $(BUILD_DIR)/initramfs.cpio: $(BUILD_DIR)/user_init.elf $(BUILD_DIR)/user_tools.
 		ledger-campaign=$(BUILD_DIR)/user_ledger_campaign.elf \
 		tcp-campaign=$(BUILD_DIR)/user_tcp_campaign.elf \
 		shared-campaign=$(BUILD_DIR)/user_shared_campaign.elf \
-		cancel-campaign=$(BUILD_DIR)/user_cancel_campaign.elf trace-campaign=$(BUILD_DIR)/user_trace_campaign.elf
+		cancel-campaign=$(BUILD_DIR)/user_cancel_campaign.elf trace-campaign=$(BUILD_DIR)/user_trace_campaign.elf bench-campaign=$(BUILD_DIR)/user_bench_campaign.elf
 
 
 -include $(UEFI_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d) $(USER_LIB_OBJS:.o=.d) \
          $(BUILD_DIR)/user/apps/init.d $(BUILD_DIR)/user/apps/sh.d $(BUILD_DIR)/user/apps/ledgerd.d $(BUILD_DIR)/user/apps/ledger_store.d $(BUILD_DIR)/user/init_test.d
--include $(BUILD_DIR)/user/apps/tools.d $(BUILD_DIR)/user/exec_campaign.d $(BUILD_DIR)/user/thread_campaign.d $(BUILD_DIR)/user/ipc_campaign.d $(BUILD_DIR)/user/fs_campaign.d $(BUILD_DIR)/user/net_campaign.d $(BUILD_DIR)/user/soak_campaign.d $(BUILD_DIR)/user/ledger_campaign.d $(BUILD_DIR)/user/tcp_campaign.d $(BUILD_DIR)/user/shared_campaign.d $(BUILD_DIR)/user/cancel_campaign.d $(BUILD_DIR)/user/trace_campaign.d $(BUILD_DIR)/user/sha256.d
+-include $(BUILD_DIR)/user/apps/tools.d $(BUILD_DIR)/user/exec_campaign.d $(BUILD_DIR)/user/thread_campaign.d $(BUILD_DIR)/user/ipc_campaign.d $(BUILD_DIR)/user/fs_campaign.d $(BUILD_DIR)/user/net_campaign.d $(BUILD_DIR)/user/soak_campaign.d $(BUILD_DIR)/user/ledger_campaign.d $(BUILD_DIR)/user/tcp_campaign.d $(BUILD_DIR)/user/shared_campaign.d $(BUILD_DIR)/user/cancel_campaign.d $(BUILD_DIR)/user/trace_campaign.d $(BUILD_DIR)/user/bench_campaign.d $(BUILD_DIR)/user/sha256.d

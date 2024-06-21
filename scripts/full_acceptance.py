@@ -5,14 +5,13 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import re
-import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 
+from acceptance_features import feature_rows
 from acceptance_schema import GAPS, GATES, RUNS, SCHEMA
 from evidence_format import file_hash
 from vm import firmware, tool
@@ -49,7 +48,7 @@ def environment():
             "python": sys.version.split()[0], "machine": os.uname().machine, "system": os.uname().sysname}
 
 
-def execute(name, checkout, dest, command, timeout):
+def execute(name, checkout, dest, command, timeout, env):
     path = dest / "logs" / f"{name}.log"
     row = {"name": name, "command": command, "timeout_seconds": timeout, "started": utc(),
            "log": str(path.relative_to(dest)), "timed_out": False}
@@ -57,7 +56,7 @@ def execute(name, checkout, dest, command, timeout):
     print(f"Running {name}...", flush=True)
     with path.open("wb") as log:
         try:
-            with subprocess.Popen(command, cwd=checkout, stdout=log, stderr=subprocess.STDOUT,
+            with subprocess.Popen(command, cwd=checkout, env=env, stdout=log, stderr=subprocess.STDOUT,
                                   start_new_session=True) as process:
                 try:
                     row["exit"] = process.wait(timeout=timeout)
@@ -87,7 +86,7 @@ def preserve(checkout, dest, patterns):
             continue
         target = dest / "raw" / original.relative_to(source)
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(original, target)
+        copy_artifact(original, target)
         kept.append(str(target.relative_to(dest)))
     return kept
 
@@ -104,6 +103,12 @@ def run():
     (dest / "logs").mkdir()
     print(f"Acceptance evidence: {dest}", flush=True)
     results = {}
+    env = dict(os.environ)
+    from test_tcp_reference import ISO_NAME
+
+    reference = env.get("STRATUM_REFERENCE_ISO")
+    env["STRATUM_REFERENCE_ISO"] = str(Path(reference).resolve() if reference else
+                                       root / "build" / "reference-alpine" / ISO_NAME)
     with tempfile.TemporaryDirectory(prefix="frozen-", dir=output) as workspace:
         checkout = Path(workspace) / "source"
         subprocess.run(["git", "clone", "--quiet", "--local", "--no-hardlinks", str(root), str(checkout)],
@@ -116,7 +121,7 @@ def run():
               ThreadPoolExecutor(max_workers=1) as parallel):
             def exercise(name):
                 command, timeout, patterns = RUNS[name]
-                row = execute(name, checkout, dest, command, timeout)
+                row = execute(name, checkout, dest, command, timeout, env)
                 row["artifacts"] = preserve(checkout, dest, patterns)
                 return row
 
@@ -153,18 +158,20 @@ def run():
         status = "failed" if failed else ("blocked" if blocked else ("unverified" if gap else "passed"))
         gates[gate] = {"status": status, "failed_workloads": failed, "blocked_workloads": blocked,
                        "required_workloads": requirements, "unverified_requirement": gap}
-    features = {}
-    plan = git(root, "show", f"{commit}:docs/ACCEPTANCE_PLAN.md").decode("utf-8")
-    for identity, title, paths, verification in re.findall(r"^\| (K\d\d) \| ([^|]+) \| ([^|]+) \| ([^|]+) \|$", plan, re.M):
-        features[identity] = {"feature": title, "declared_paths": paths, "verification": verification,
-                              "status": "unverified"}
-    if len(features) != 64:
-        raise RuntimeError("capability register does not contain exactly 64 rows")
+    plan = (root / "docs/ACCEPTANCE_PLAN.md").read_text(encoding="utf-8")
+    features = feature_rows(plan, results, commit)
+    statuses = [row["status"] for row in (*gates.values(), *features.values())]
+    counts = {key: statuses.count(key) for key in ("passed", "failed", "blocked", "unverified", "skipped")}
+    result = "passed" if counts["passed"] == len(statuses) else "incomplete"
     write(dest / "features.json", features)
     write(dest / "workloads.json", results)
-    write(dest / "ACCEPTANCE.json", {"schema": SCHEMA, "source": commit, "result": "incomplete", "gates": gates})
+    write(dest / "ACCEPTANCE.json", {"schema": SCHEMA, "source": commit, "result": result, "counts": counts, "gates": gates})
     write(dest / "MANIFEST.json", {"schema": SCHEMA, "source": commit, "files": {
         str(path.relative_to(dest)): file_hash(path) for path in sorted(dest.rglob("*")) if path.is_file()
     }})
-    print("Full acceptance is incomplete. See ACCEPTANCE.json for failed and unverified gates.", flush=True)
-    return 1
+    verification = subprocess.run([sys.executable, "scripts/verify_evidence.py", "--inspect", str(dest)],
+                                  timeout=300)
+    if verification.returncode:
+        return 2
+    print(f"Fixed workload result: {result}. See {dest / 'ACCEPTANCE.json'}.", flush=True)
+    return int(result != "passed")
