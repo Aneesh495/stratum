@@ -13,7 +13,7 @@ import time
 
 from acceptance_features import feature_rows
 from acceptance_schema import GAPS, GATES, RUNS, SCHEMA
-from evidence_format import file_hash
+from evidence_format import copy_artifact, file_hash
 from vm import firmware, tool
 
 
