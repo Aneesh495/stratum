@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 import subprocess
 
-from acceptance_features import feature_rows
+from acceptance_features import feature_rows, parse_register
 from acceptance_schema import GAPS, GATES, RUNS, SCHEMA
 from evidence_format import file_hash
 
@@ -81,7 +81,7 @@ def verify(root, *, require_complete=True):
     features = document(root / "features.json")
     require(features.keys() == {f"K{i:02d}" for i in range(1, 65)}, "missing or extra capabilities")
     plan = Path("docs/ACCEPTANCE_PLAN.md").read_text(encoding="utf-8")
-    require(features == feature_rows(plan, workloads, commit), "capability evidence mismatch")
+    require(features == feature_rows(parse_register(plan), workloads, commit), "capability evidence mismatch")
     require(all(path in tracked for row in features.values() for path in row["source_paths"]),
             "capability points to untracked source")
     for gate, expected in GATES.items():

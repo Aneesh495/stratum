@@ -90,11 +90,24 @@ OPEN = {
 }
 
 
-def feature_rows(plan, results, commit):
+def parse_register(plan):
+    register = {}
+    for line in plan.splitlines():
+        columns = [part.strip() for part in line.split("|")]
+        if len(columns) != 6 or not re.fullmatch(r"K[0-9]{2}", columns[1]):
+            continue
+        _, identity, title, declared_paths, expectation, _ = columns
+        if not (title and declared_paths and expectation) or identity in register:
+            raise ValueError(f"invalid or duplicate capability register row: {identity}")
+        register[identity] = (title, expectation)
+    if register.keys() != BINDINGS.keys() or len(register) != 64:
+        raise ValueError("capability register does not contain the 64 bound capability IDs")
+    return register
+
+
+def feature_rows(register, results, commit):
     rows = {}
-    for identity, title, _, expectation in re.findall(
-        r"^\| (K\d\d) \| ([^|]+) \| ([^|]+) \| ([^|]+) \|$", plan, re.M
-    ):
+    for identity, (title, expectation) in register.items():
         paths, test_ids = BINDINGS[identity]
         observations = {}
         for name in test_ids.split():
@@ -116,6 +129,4 @@ def feature_rows(plan, results, commit):
             "expected": expectation.strip(), "observations": observations,
             "open_requirement": OPEN.get(identity), "status": status,
         }
-    if rows.keys() != BINDINGS.keys() or len(rows) != 64:
-        raise ValueError("capability register does not contain the 64 bound capability IDs")
     return rows
