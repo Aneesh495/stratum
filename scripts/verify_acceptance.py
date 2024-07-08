@@ -6,6 +6,7 @@ import os
 import re
 from pathlib import Path
 import subprocess
+import struct
 
 from acceptance_features import feature_rows, parse_register
 from acceptance_schema import GAPS, GATES, RUNS, SCHEMA
@@ -114,7 +115,19 @@ def verify(root, *, require_complete=True):
             log = (boot_path.parent / f"{tag}.log").read_bytes()
             observed = re.findall(rb"^\[BOOT-PROBE\] cpu=(\d+) result=[0-9a-f]+\r?$", log, re.M)
             require(list(map(int, observed)) == list(range(cpus)), f"{tag}: missing CPU probe")
-        require((boot_path.parent / "entry.json").is_file(), "missing debugger boot observation")
+        kernel = result_path("image", "stratum.elf")
+        entry = boot["entry"]
+        with kernel.open("rb") as stream:
+            stream.seek(24)
+            elf_entry, = struct.unpack("<Q", stream.read(8))
+        handoff = bytes.fromhex(entry["handoff"])
+        require(boot["kernel"] == file_hash(kernel) and
+                boot["boot_image"] == file_hash(result_path("image", "stratum-boot.img")) and
+                boot["data_image"] == file_hash(result_path("image", "stratum-data.img")) and
+                boot["firmware"] == environment["firmware_sha256"], "boot evidence identity mismatch")
+        require(entry["rip"] == elf_entry and entry["rdi"] > 0 and len(handoff) == 112 and
+                struct.unpack_from("<QII", handoff) == (0x5354524154554d31, 1, 368) and
+                entry["rsi"] == 0x5354524154554d31, "invalid debugger entry observation")
 
     if acceptance["gates"]["A02"]["status"] == "passed":
         exhaustion = result_path("shared", "exhaust.log").read_bytes()
