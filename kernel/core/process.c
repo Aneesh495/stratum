@@ -52,6 +52,30 @@ uint32_t process_active_count(void) {
     return count;
 }
 
+int process_info(uint64_t slot, strat_process_info_t *info) {
+    if (slot >= PROCESS_MAX_COUNT) return -STRATUM_ERANGE;
+    uint64_t flags;
+    spin_lock_irqsave(&g_process_lock, &flags);
+    const process_t *proc = &g_process_pool[slot];
+    bool used = proc->state == PROC_STATE_ALIVE || proc->state == PROC_STATE_ZOMBIE;
+    if (used) {
+        info->pid = proc->pid;
+        info->ppid = proc->ppid;
+        info->exited = proc->state == PROC_STATE_ZOMBIE;
+        memcpy(info->name, proc->name, sizeof(info->name));
+    }
+    spin_unlock_irqrestore(&g_process_lock, flags);
+    return used;
+}
+
+void process_set_name(process_t *proc, const char *name) {
+    uint64_t flags;
+    spin_lock_irqsave(&g_process_lock, &flags);
+    strncpy(proc->name, name, sizeof(proc->name) - 1);
+    proc->name[sizeof(proc->name) - 1] = 0;
+    spin_unlock_irqrestore(&g_process_lock, flags);
+}
+
 process_t *process_find(uint32_t pid) {
     uint64_t flags;
     spin_lock_irqsave(&g_process_lock, &flags);

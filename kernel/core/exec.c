@@ -148,8 +148,7 @@ int process_exec(const char *path, const char *const *argv, const char *const *e
     memset(proc->regions, 0, sizeof(proc->regions));
     memset(proc->workers, 0, sizeof(proc->workers));
     const char *leaf = strrchr(kernel_path, '/');
-    strncpy(proc->name, leaf ? leaf + 1 : kernel_path, sizeof(proc->name) - 1);
-    proc->name[sizeof(proc->name) - 1] = 0;
+    process_set_name(proc, leaf ? leaf + 1 : kernel_path);
     vmm_switch_address_space(image.address_space);
     thread_reset_user_state(thread);
     vmm_destroy_address_space(old);

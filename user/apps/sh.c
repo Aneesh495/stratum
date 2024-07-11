@@ -27,6 +27,8 @@ static void cmd_help(void) {
     u_printf("  ledgerput <id> <value>  Store a local durable record\n");
     u_printf("  ledgerpull <ip> <id>    Fetch and store a peer record\n");
     u_printf("  ledgerd [peer-ip]   Serve durable records and optionally replicate appends\n");
+    u_printf("  ps                  List process IDs, parents and state\n");
+    u_printf("  exit                Exit the current shell\n");
     u_printf("  sysinfo             Display kernel memory, CPUs, and uptime\n");
     u_printf("  trace               Show recent events on this CPU\n");
     u_printf("  cp <from> <to>      Copy a file to a new path\n");
@@ -115,6 +117,17 @@ static void cmd_rm(const char *path) {
     } else {
         u_printf("File '%s' unlinked.\n", path);
     }
+}
+
+static int cmd_ps(void) {
+    u_printf("PID PPID STATE NAME\n");
+    for (unsigned slot = 0; slot < STRAT_PROCESS_SLOTS; slot++) {
+        strat_process_info_t info;
+        int result = strat_process_info(slot, &info);
+        if (result < 0) return result;
+        if (result) u_printf("%u %u %s %s\n", info.pid, info.ppid, info.exited ? "zombie" : "alive", info.name);
+    }
+    return 0;
 }
 
 static void cmd_sysinfo(void) {
@@ -232,6 +245,11 @@ static int sh_builtin(int argc, char **argv) {
         return result;
     } else if (strcmp(argv[0], "trace") == 0) {
         return argc <= 2 ? cmd_trace(argc == 2 ? argv[1] : NULL) : -STRATUM_EINVAL;
+    } else if (strcmp(argv[0], "ps") == 0) {
+        return argc == 1 ? cmd_ps() : -STRATUM_EINVAL;
+    } else if (strcmp(argv[0], "exit") == 0) {
+        if (argc != 1) return -STRATUM_EINVAL;
+        exit(0);
     } else if (strcmp(argv[0], "sysinfo") == 0) {
         cmd_sysinfo();
     } else if ((strcmp(argv[0], "ledgerput") == 0 || strcmp(argv[0], "ledgerpull") == 0) && argc == 3) {

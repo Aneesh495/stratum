@@ -42,6 +42,14 @@ def verify(root, gates, result_path, document, require):
             check("cancellation", name, f"cancellations=10008 group_exits=256 CPUs={cpus}".encode(),
                   b"Socket poll races=2500 and orphan process reaps=32")
 
+    if completed("A04"):
+        for cpus in (1, 4):
+            raw_log = raw("supervision", f"{cpus}cpu.log")
+            reaped = re.findall(rb"\[INIT\] Reaped shell pid=(\d+) status=0", raw_log)
+            require(len(reaped) == len(set(reaped)) == 4 and raw_log.count(
+                b"[KERNEL] Kernel entered at higher-half entry point"
+            ) == 1 and b"same-boot\r\n" in raw_log, "native supervision evidence mismatch")
+
     if completed("A06"):
         check("block-wrap", "blk-wrap.log", b"150000 reads, 2 available wraps, 2 used wraps")
         check("block-errors", "blk-errors.log", b"Block saturation: 500 cases", b"Block reset: 500 cases",
@@ -125,3 +133,11 @@ def verify(root, gates, result_path, document, require):
                 len(malformed["cases"]) == 10 and set(malformed["cases"].values()) == {1000} and
                 file_hash(result_path("net-reject", "ethernet.pcap")) == malformed["pcap_sha256"],
                 "invalid Ethernet case or wire evidence mismatch")
+
+        from test_icmp import CASES, verify_capture
+
+        icmp = document(result_path("icmp", "results.json"))
+        capture = result_path("icmp", "ethernet.pcap")
+        require(icmp["valid_echoes"] == icmp["rejected_checksums"] == CASES and
+                file_hash(capture) == icmp["capture_sha256"] and
+                verify_capture(capture) == icmp["payload_sha256"], "ICMP payload or checksum evidence mismatch")

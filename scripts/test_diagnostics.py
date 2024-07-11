@@ -2,7 +2,10 @@
 """Run opt-in kernel checks with bounded waits and disposable disk images."""
 
 import argparse
+import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 
 from vm import BOOT_IMAGE, boot_profile, command, fresh_disk, running
@@ -41,6 +44,14 @@ def main():
                         raw = guest.expect(MARKERS[suite])
                         if f"{cpus} CPU(s) online and active".encode() not in raw and cpus != 1:
                             raise RuntimeError(f"expected {cpus} online CPUs")
+                if fault:
+                    symbols = subprocess.check_output([
+                        sys.executable, "tools/symbolize_panic.py", "build/stratum.elf", str(logs / f"{suite}-{cpus}.log")
+                    ], timeout=15)
+                    frames = json.loads(symbols)["frames"]
+                    if len(frames) != 1 or frames[0]["symbol"] != "kmain" or frames[0]["opcode"] != "0f0b":
+                        raise RuntimeError("kernel fault did not resolve to the injected ud2")
+                    (logs / f"{suite}-{cpus}-symbols.json").write_bytes(symbols)
                 print(f"[PASS] {suite}, {cpus} vCPU(s)", flush=True)
 
 

@@ -524,6 +524,14 @@ static int64_t dispatch_syscall(syscall_regs_t *regs) {
         return copy_to_user((void *)regs->rdi, &resources, sizeof(resources));
     }
 
+    case SYS_process_info: {
+        strat_process_info_t info = {0};
+        int result = process_info(regs->rdi, &info);
+        if (result <= 0) return result;
+        int copied = copy_to_user((void *)regs->rsi, &info, sizeof(info));
+        return copied ? copied : 1;
+    }
+
     case SYS_tcp_recovery:
         return (int64_t)tcp_fast_retransmits();
 
