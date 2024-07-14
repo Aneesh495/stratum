@@ -214,14 +214,17 @@ int main(void) {
         if (orphan_reap(i % before.online_cpus, before.active_processes)) return 1;
     }
     u_printf("[PASS] Socket poll races=2500 and orphan process reaps=32\n");
-    if (snapshot(&after, &resource_after) || before.free_memory_bytes != after.free_memory_bytes ||
+    if (snapshot(&after, &resource_after)) return 1;
+    uint64_t available_before = before.free_memory_bytes + resource_before.slab_pages * 4096;
+    uint64_t available_after = after.free_memory_bytes + resource_after.slab_pages * 4096;
+    u_printf("[ACCOUNTING] free_before=%lu free_after=%lu slab_before=%lu slab_after=%lu "
+             "objects_before=%lu objects_after=%lu\n", before.free_memory_bytes, after.free_memory_bytes,
+             resource_before.slab_pages, resource_after.slab_pages, resource_before.slab_objects,
+             resource_after.slab_objects);
+    if (available_before != available_after || resource_before.slab_objects != resource_after.slab_objects ||
         before.active_processes != after.active_processes || resource_before.threads != resource_after.threads ||
-        resource_before.file_objects != resource_after.file_objects) {
-        u_printf("cancel-campaign: before pages=%lu threads=%lu files=%lu after pages=%lu threads=%lu files=%lu\n",
-                 before.free_memory_bytes, resource_before.threads, resource_before.file_objects,
-                 after.free_memory_bytes, resource_after.threads, resource_after.file_objects);
-        return 1;
-    }
+        resource_before.file_objects != resource_after.file_objects ||
+        resource_before.packet_buffers != resource_after.packet_buffers) return 1;
     u_printf("[PASS] cancellations=%u group_exits=%u CPUs=%u with pages, threads, and files reconciled\n",
              TARGET_ROUNDS * WORKERS, EXIT_ROUNDS, before.online_cpus);
     return 0;

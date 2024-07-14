@@ -16,6 +16,7 @@
 #include <kernel/virtio_net.h>
 #include <kernel/net.h>
 #include <kernel/tcp.h>
+#include <kernel/slab.h>
 #include <kernel/stratafs.h>
 #include <kernel/trace.h>
 #include <kernel/pmm.h>
@@ -521,6 +522,7 @@ static int64_t dispatch_syscall(syscall_regs_t *regs) {
             .packet_buffers = pbuf_live_count(),
         };
         stratafs_journal_usage(&resources.journal_capacity, &resources.journal_pending);
+        slab_usage(&resources.slab_pages, &resources.slab_objects);
         return copy_to_user((void *)regs->rdi, &resources, sizeof(resources));
     }
 

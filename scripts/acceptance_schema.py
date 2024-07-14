@@ -1,16 +1,16 @@
 """Versioned commands and fixed gate coverage shared by evidence tools."""
 
-SCHEMA = 2
+SCHEMA = 3
 # Keys correspond to docs/ACCEPTANCE_PLAN.md. A workload exit alone cannot clear a gap.
 GATES = {
-    "A01": ("boot", "framebuffer"),
-    "A02": ("host", "diagnostics", "shared", "tlb"),
+    "A01": ("boot", "framebuffer", "entry-stacks"),
+    "A02": ("host", "diagnostics", "shared", "tlb", "resource-limits"),
     "A03": ("threads", "cancellation", "wait-tlb-model"),
     "A04": ("exec", "threads", "cancellation", "supervision"),
     "A05": ("ipc", "cancellation"),
     "A06": ("block-wrap", "block-errors", "block-timeout", "net-wrap"),
     "A07": ("wal-model", "storage-mixed", "storage-namespace", "storage-cache", "tmpfs", "wal-crash"),
-    "A08": ("net-wrap", "tcp", "tcp-reference", "tcp-recovery", "net-reject", "icmp"),
+    "A08": ("net-wrap", "tcp", "tcp-reference", "tcp-recovery", "net-reject", "icmp", "resource-limits"),
     "A09": ("service",),
     "A10": ("soak",),
     "A11": ("production-fuzz", "wait-tlb-model"),
@@ -30,8 +30,10 @@ RUNS = {
     "image": (("make", "-j4", "image"), 240, ("images/*.img", "stratum.elf", "BOOTX64.EFI", "initramfs.cpio")),
     "boot": (python("scripts/test_boot_campaign.py"), 1200, ("boot-campaign/**/*",)),
     "framebuffer": (python("scripts/test_framebuffer.py"), 120, ("framebuffer/*",)),
+    "entry-stacks": (python("scripts/test_entry_stacks.py"), 120, ("entry-stacks/*",)),
     "host": (("make", "test", "fuzz"), 300, ()),
     "diagnostics": (python("scripts/test_diagnostics.py", "all"), 300, ("diagnostics/*",)),
+    "resource-limits": (python("scripts/test_resource_limits.py"), 120, ("resource-limits/*",)),
     "shared": (python("scripts/test_shared.py"), 300, ("shared/*",)),
     "tlb": (python("scripts/test_tlb.py"), 400, ("tlb/*",)),
     "threads": (python("scripts/test_threads.py"), 400, ("threads/*",)),

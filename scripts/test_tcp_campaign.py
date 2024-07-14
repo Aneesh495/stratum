@@ -46,12 +46,15 @@ def tcp(frame):
 
 
 class Impairment:
-    def __init__(self, skip_loss=0):
+    def __init__(self, skip_loss=0, repeat_gap_ack=False):
         self.skip_loss = skip_loss
+        self.repeat_gap_ack = repeat_gap_ack
         self.server_segments = {}
         self.profiles = {}
         self.applied = {}
         self.pending = {}
+        self.loss_followed = set()
+        self.ack_bursts = set()
 
     def transform(self, sender, packet):
         segment = tcp(packet[4:])
@@ -62,7 +65,21 @@ class Impairment:
         if sender == 1 and destination == PORT and flags & (SYN | ACK) == SYN:
             self.profiles.setdefault(peer, ("loss", "duplicate", "reorder")[len(self.profiles) % 3])
         profile = self.profiles.get(peer)
-        if not data or profile is None or peer in self.applied:
+        if peer in self.applied:
+            mode, dropped = self.applied[peer]
+            if self.repeat_gap_ack and mode == "loss" and peer not in self.ack_bursts:
+                if sender == 0 and data and 0 < ((sequence - dropped) & 0xffffffff) < 65536:
+                    self.loss_followed.add(peer)
+                if sender == 1 and not data and flags == ACK and peer in self.loss_followed:
+                    frame = packet[4:]
+                    start = 14 + (frame[14] & 15) * 4
+                    cumulative_ack, = struct.unpack_from("!I", frame, start + 8)
+                    if cumulative_ack == dropped:
+                        self.ack_bursts.add(peer)
+                        # Preserve the genuine gap ACK and duplicate it three times.
+                        return (packet,) * 4
+            return (packet,)
+        if not data or profile is None:
             return (packet,)
         if profile == "loss" and sender == 0:
             seen = self.server_segments.get(peer, 0)
@@ -223,9 +240,9 @@ def reference_run(sessions, size, logs):
             "wire_payload_sha256": verify_wire(capture, sessions, size)}
 
 
-def impaired_run(sessions, logs, size=IMPAIRED_BYTES, *, skip_loss=0):
+def impaired_run(sessions, logs, size=IMPAIRED_BYTES, *, skip_loss=0, repeat_gap_ack=False):
     capture = logs / "impaired-ethernet.pcap"
-    faults = Impairment(skip_loss)
+    faults = Impairment(skip_loss, repeat_gap_ack)
     with tempfile.TemporaryDirectory(dir="build") as directory, link(faults.transform) as (_, (p1, p2)):
         follower = boot_profile(BOOT_IMAGE, Path(directory), "ip=10.0.2.16")
         server_cmd = command(BOOT_IMAGE, cpus=2, ethernet=f"connect=127.0.0.1:{p1}", capture=capture)
@@ -240,7 +257,8 @@ def impaired_run(sessions, logs, size=IMPAIRED_BYTES, *, skip_loss=0):
             fast = server_completed(server, sessions, size)
     digest = verify_wire(capture, sessions, size, faults)
     return {"sessions": sessions, "bytes": sessions * size * 2, "pcap_sha256": file_hash(capture),
-            "wire_payload_sha256": digest, "impairments": faults.applied, "fast_retransmits": fast}
+            "wire_payload_sha256": digest, "impairments": faults.applied, "fast_retransmits": fast,
+            "duplicate_ack_bursts": len(faults.ack_bursts)}
 
 
 if __name__ == "__main__":

@@ -55,6 +55,7 @@ typedef void (*irq_handler_t)(interrupt_frame_t *frame);
 
 void idt_init(void);
 void idt_load(void);
+void idt_enable_stack_probe(void);
 void idt_set_gate(uint8_t vector, void *handler, uint16_t selector, uint8_t ist, uint8_t flags);
 int  register_interrupt_handler(uint8_t vector, irq_handler_t handler);
 void exception_dispatch(interrupt_frame_t *frame);

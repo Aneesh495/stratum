@@ -149,6 +149,8 @@ static void cmd_sysinfo(void) {
         u_printf("  Live Threads: %lu\n", resources.threads);
         u_printf("  File Objects: %lu\n", resources.file_objects);
         u_printf("  Packet Buffers: %lu\n", resources.packet_buffers);
+        u_printf("  Slab Pages: %lu\n", resources.slab_pages);
+        u_printf("  Slab Objects: %lu\n", resources.slab_objects);
         u_printf("  Journal Capacity: %u\n", resources.journal_capacity);
         u_printf("  Journal Pending: %u\n", resources.journal_pending);
     }
@@ -173,7 +175,8 @@ static int cmd_trace(const char *text) {
     for (uint64_t at = start; at < info.next; at++) {
         strat_trace_record_t record;
         if (strat_trace_read(cpu, at, &record)) continue;
-        u_printf("%lu tsc=%lu event=%u args=%lx,%lx,%lx,%lx\n", at, record.tsc, record.event,
+        u_printf("%lu tsc=%lu event=%u pid=%u tid=%u args=%lx,%lx,%lx,%lx\n",
+                 at, record.tsc, record.event, record.pid, record.tid,
                  record.args[0], record.args[1], record.args[2], record.args[3]);
     }
     return 0;

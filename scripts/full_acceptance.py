@@ -86,7 +86,12 @@ def preserve(checkout, dest, patterns):
             continue
         target = dest / "raw" / original.relative_to(source)
         target.parent.mkdir(parents=True, exist_ok=True)
-        copy_artifact(original, target)
+        if original.suffix == ".pcap":
+            # The completed workload has closed this capture. Keep its inode
+            # until the frozen checkout is removed to avoid a second large copy.
+            os.link(original, target)
+        else:
+            copy_artifact(original, target)
         kept.append(str(target.relative_to(dest)))
     return kept
 

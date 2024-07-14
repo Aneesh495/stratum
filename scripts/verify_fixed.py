@@ -2,6 +2,7 @@
 
 import re
 
+from test_cancel import check_accounting
 from test_ipc import check_transcript
 from test_tcp_campaign import BULK_BYTES, IMPAIRED_BYTES, verify_wire
 from test_threads import check_population
@@ -27,6 +28,17 @@ def verify(root, gates, result_path, document, require):
                 contains_glyph_row(result_path("framebuffer", "after.ppm")), "framebuffer glyph mismatch")
         check("framebuffer", "guest.log", b"sysinfo", b"ZZZZZZZZ")
 
+    if completed("A01"):
+        from test_entry_stacks import check_stacks
+
+        for cpus in (1, 4, 8):
+            check_stacks(raw("entry-stacks", f"{cpus}cpu.log"), cpus)
+
+    if completed("A02"):
+        from test_resource_limits import check_slab
+
+        check_slab(raw("resource-limits", "slab.log"))
+
     for cpus in (4, 8):
         name = f"{cpus}cpu.log"
         if completed("A03"):
@@ -39,6 +51,7 @@ def verify(root, gates, result_path, document, require):
         if completed("A05"):
             check_transcript(raw("ipc", name), "bb15c4cb1fd3582d", "f94679431f16ead7")
         if any(completed(gate) for gate in ("A03", "A04", "A05")):
+            check_accounting(raw("cancellation", name))
             check("cancellation", name, f"cancellations=10008 group_exits=256 CPUs={cpus}".encode(),
                   b"Socket poll races=2500 and orphan process reaps=32")
 
@@ -65,6 +78,10 @@ def verify(root, gates, result_path, document, require):
                 "mixed filesystem count mismatch")
         check("storage-cache", "cache.log", b"StrataFS cache hits=", b"Block MSI-X woke")
         check("storage-cache", "alloc-fail.log", b"occurrence=2", b"allocation rollback and exact retry bytes")
+        check("storage-cache", "flush-error.log", b"Backend flush failure surfaced as EIO")
+        check("storage-cache", "flush-reboot.log", b"stable\r\n", b"accepted exact retry after remount")
+        check("storage-cache", "flush-confirmed.log", b"stable\r\nagain\r\n")
+        check("storage-cache", "flush-checker.log", b"[PASSED]")
         check("tmpfs", "initial.log", b"tmpfs mount, sparse I/O, namespace and retained handles")
         check("tmpfs", "reboot.log", b"err=-2", b"disk")
         campaign = result_path("wal-crash", "campaign.json")
@@ -122,7 +139,8 @@ def verify(root, gates, result_path, document, require):
         recovery = document(result_path("tcp-recovery", "results.json"))
         recovery_wire = result_path("tcp-recovery", "impaired-ethernet.pcap")
         require(recovery["sessions"] == 24 and recovery["bytes"] == 1572864 and
-                recovery["fast_retransmits"] > 0 and len(recovery["impairments"]) == 24 and
+                recovery["fast_retransmits"] > 0 and recovery["duplicate_ack_bursts"] > 0 and
+                len(recovery["impairments"]) == 24 and
                 file_hash(recovery_wire) == recovery["pcap_sha256"] and
                 verify_wire(recovery_wire, 24, 32768) == recovery["wire_payload_sha256"],
                 "fast TCP recovery or reassembly evidence mismatch")
@@ -134,6 +152,7 @@ def verify(root, gates, result_path, document, require):
                 file_hash(result_path("net-reject", "ethernet.pcap")) == malformed["pcap_sha256"],
                 "invalid Ethernet case or wire evidence mismatch")
 
+        check("resource-limits", "sockets.log", b"TCP sockets=128 ENOBUFS=2 capacity recycled")
         from test_icmp import CASES, verify_capture
 
         icmp = document(result_path("icmp", "results.json"))

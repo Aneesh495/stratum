@@ -320,7 +320,25 @@ static int futex_races(void) {
     return 0;
 }
 
+static int entry_stacks(void) {
+    strat_sysinfo_t info;
+    if (sysinfo(&info)) return 1;
+    for (unsigned cpu = 0; cpu < info.online_cpus; cpu++) {
+        int child = strat_fork_on_cpu(cpu);
+        if (!child) {
+            uint64_t cookie = 0x53544143;
+            __asm__ volatile("int $0xf4" : "+a"(cookie) :: "memory");
+            exit(cookie == 0x53544144 && strat_getcpu() == (int)cpu ? 0 : 1);
+        }
+        int status = -1;
+        if (child < 0 || waitpid(child, &status, 0) != child || status) return 2;
+    }
+    u_printf("[PASS] nested protected stacks on %u CPUs\n", info.online_cpus);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "entry")) return entry_stacks();
     if (argc != 2) return 1;
     int result;
     if (!strcmp(argv[1], "lifecycle")) result = lifecycle();

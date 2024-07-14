@@ -14,6 +14,7 @@ def main():
         with running(command(BOOT_IMAGE, disk, cpus=4), Path("build/trace/guest.log")) as guest:
             guest.expect(PROMPT)
             output = shell(guest, "/bin/trace-campaign")
+            require(b"trace wait and wake correlated pid=", output)
             result = re.search(rb"trace overflow cpu=(\d+) retained=1024 lost=(\d+) verified=(\d+) newest=4095", output)
             if not result or int(result[1]) >= 4 or int(result[2]) < 3072 or int(result[3]) < 900:
                 raise RuntimeError(f"missing trace overflow evidence: {output!r}")

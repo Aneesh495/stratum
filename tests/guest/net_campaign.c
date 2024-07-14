@@ -2,6 +2,7 @@
 #include <shared/errno.h>
 #include <user/strat_api.h>
 
+extern int strcmp(const char *, const char *);
 extern void u_printf(const char *, ...);
 
 #define WIRE_PORT 40960
@@ -71,7 +72,65 @@ static int campaign(unsigned count, unsigned invalid) {
     return 0;
 }
 
+static int socket_holder(int ready, int release) {
+    int sockets[48];
+    for (unsigned i = 0; i < 48; i++) {
+        sockets[i] = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sockets[i] < 0) return 1;
+    }
+    char byte = '+';
+    if (write(ready, &byte, 1) != 1 || read(release, &byte, 1) != 1 || byte != '-') return 2;
+    for (unsigned i = 0; i < 48; i++) if (close(sockets[i])) return 3;
+    return 0;
+}
+
+static int socket_capacity(void) {
+    int ready[2], release[2], children[2];
+    strat_resources_t before, after;
+    if (strat_resources(&before) || pipe(ready) || pipe(release)) return 1;
+    for (unsigned i = 0; i < 2; i++) {
+        children[i] = strat_fork_on_cpu(i);
+        if (!children[i]) {
+            close(ready[0]);
+            close(release[1]);
+            exit(socket_holder(ready[1], release[0]));
+        }
+        if (children[i] < 0) return 2;
+    }
+    close(ready[1]);
+    close(release[0]);
+    for (unsigned i = 0; i < 2; i++) {
+        char token;
+        if (read(ready[0], &token, 1) != 1 || token != '+') return 3;
+    }
+    int sockets[32];
+    for (unsigned i = 0; i < 32; i++) {
+        sockets[i] = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sockets[i] < 0) return 4;
+    }
+    int extra = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (extra != -STRATUM_ENOBUFS || close(sockets[31])) return 5;
+    sockets[31] = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sockets[31] < 0 || socket(AF_INET, SOCK_STREAM, IPPROTO_TCP) != -STRATUM_ENOBUFS) return 6;
+    for (unsigned i = 0; i < 32; i++) if (close(sockets[i])) return 7;
+    if (write(release[1], "--", 2) != 2 || close(release[1]) || close(ready[0])) return 8;
+    for (unsigned i = 0; i < 2; i++) {
+        int status;
+        if (waitpid(children[i], &status, 0) != children[i] || status) return 9;
+    }
+    if (strat_resources(&after) || before.file_objects != after.file_objects ||
+        before.packet_buffers != after.packet_buffers || before.threads != after.threads ||
+        before.slab_objects != after.slab_objects) return 10;
+    u_printf("[PASS] TCP sockets=128 ENOBUFS=2 capacity recycled and resources reconciled\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "limits")) {
+        int result = socket_capacity();
+        if (result) u_printf("net-campaign: socket capacity failure=%d\n", result);
+        return result;
+    }
     unsigned count = argc == 2 || argc == 3 ? limit(argv[1]) : 0;
     unsigned invalid = argc == 3 ? limit(argv[2]) : 0;
     if (!count || (argc == 3 && !invalid) || invalid > 10000 || count + invalid > NETWORK_LIMIT) return 1;

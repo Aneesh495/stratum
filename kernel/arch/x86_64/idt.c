@@ -1,3 +1,5 @@
+#include <kernel/smp.h>
+#include <kernel/gdt.h>
 #include <kernel/idt.h>
 #include <kernel/kernel.h>
 #include <kernel/string.h>
@@ -115,6 +117,51 @@ void exception_dispatch(interrupt_frame_t *frame) {
             g_irq_handlers[frame->vector](frame);
         }
     }
+}
+
+#define PROBE_ENTRY 0xf4
+#define PROBE_IST1  0xf5
+#define PROBE_IST2  0xf6
+#define PROBE_COOKIE 0x53544143UL
+
+static bool on_probe_stack(uint64_t pointer, uint64_t top) {
+    return pointer < top && top - pointer <= 8192;
+}
+
+static void stack_probe(interrupt_frame_t *frame) {
+    const tss_t *tss = gdt_current_tss();
+    uint64_t address = (uint64_t)frame;
+    if (frame->vector == PROBE_IST2) {
+        kassert(frame->cs == KERNEL_CS && on_probe_stack(frame->rsp, tss->ist1));
+        kassert(on_probe_stack(address, tss->ist2) && tss->ist2 != tss->ist1);
+        frame->rax = address;
+    } else if (frame->vector == PROBE_IST1) {
+        kassert(frame->cs == KERNEL_CS && on_probe_stack(frame->rsp, tss->rsp0));
+        kassert(on_probe_stack(address, tss->ist1) && tss->ist1 != tss->rsp0);
+        uint64_t nested;
+        __asm__ volatile("int $0xf6" : "=a"(nested) :: "memory");
+        kassert(on_probe_stack(nested, tss->ist2));
+        frame->rax = address;
+        frame->rbx = nested;
+    } else {
+        kassert(frame->cs == USER_CS && frame->ss == USER_DS && frame->rsp < (1ULL << 47));
+        kassert(frame->rax == PROBE_COOKIE && on_probe_stack(address, tss->rsp0));
+        uint64_t first, second;
+        __asm__ volatile("int $0xf5" : "=a"(first), "=b"(second) :: "memory");
+        kassert(on_probe_stack(first, tss->ist1) && on_probe_stack(second, tss->ist2));
+        kprintf("[IST] cpu=%u entry=%lx ist1=%lx ist2=%lx\n",
+                smp_get_cpu_id(), address, first, second);
+        frame->rax = PROBE_COOKIE + 1;
+    }
+}
+
+void idt_enable_stack_probe(void) {
+    idt_set_gate(PROBE_ENTRY, (void *)isr_stub_table[PROBE_ENTRY], KERNEL_CS, 0, 0xee);
+    idt_set_gate(PROBE_IST1, (void *)isr_stub_table[PROBE_IST1], KERNEL_CS, 1, 0x8e);
+    idt_set_gate(PROBE_IST2, (void *)isr_stub_table[PROBE_IST2], KERNEL_CS, 2, 0x8e);
+    register_interrupt_handler(PROBE_ENTRY, stack_probe);
+    register_interrupt_handler(PROBE_IST1, stack_probe);
+    register_interrupt_handler(PROBE_IST2, stack_probe);
 }
 
 void idt_load(void) {

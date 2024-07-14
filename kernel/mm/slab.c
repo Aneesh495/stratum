@@ -32,6 +32,13 @@ struct kmem_cache {
 };
 
 static kmem_cache_t g_general_caches[NUM_SIZE_CLASSES];
+static uint64_t g_slab_pages;
+static uint64_t g_slab_objects;
+
+void slab_usage(uint64_t *pages, uint64_t *live_objects) {
+    *pages = __atomic_load_n(&g_slab_pages, __ATOMIC_RELAXED);
+    *live_objects = __atomic_load_n(&g_slab_objects, __ATOMIC_RELAXED);
+}
 
 typedef struct {
     uint32_t magic;
@@ -86,6 +93,7 @@ static slab_page_t *alloc_slab_page(kmem_cache_t *cache) {
     slab->cache = cache;
     slab->inuse = 0;
     slab->next = NULL;
+    memset(slab->allocated, 0, sizeof(slab->allocated));
 
     /* Build linked free list in remaining page space */
     size_t offset = (sizeof(slab_page_t) + cache->align - 1) & ~(cache->align - 1);
@@ -106,6 +114,7 @@ static slab_page_t *alloc_slab_page(kmem_cache_t *cache) {
     }
 
     slab->capacity = count;
+    __atomic_add_fetch(&g_slab_pages, 1, __ATOMIC_RELAXED);
     return slab;
 }
 
@@ -133,6 +142,7 @@ void *kmem_cache_alloc(kmem_cache_t *cache) {
     slab->allocated[index / 64] |= 1ULL << (index % 64);
     slab->inuse++;
     cache->total_allocs++;
+    __atomic_add_fetch(&g_slab_objects, 1, __ATOMIC_RELAXED);
 
     /* If slab is now full, move to full list */
     if (slab->inuse == slab->capacity) {
@@ -169,6 +179,7 @@ void kmem_cache_free(kmem_cache_t *cache, void *obj) {
     slab->free_list = obj;
     slab->inuse--;
     cache->total_frees++;
+    __atomic_sub_fetch(&g_slab_objects, 1, __ATOMIC_RELAXED);
 
     if (slab->inuse + 1 == slab->capacity) {
         slab_page_t **slot = &cache->slabs_full;
@@ -183,6 +194,7 @@ void kmem_cache_free(kmem_cache_t *cache, void *obj) {
         *slot = slab->next;
         slab->magic = 0;
         pmm_free_page(virt_to_phys(slab));
+        __atomic_sub_fetch(&g_slab_pages, 1, __ATOMIC_RELAXED);
     }
     spin_unlock_irqrestore(&cache->lock, flags);
 }

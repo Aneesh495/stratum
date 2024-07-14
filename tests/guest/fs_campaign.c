@@ -3,6 +3,7 @@
 #include <user/strat_api.h>
 
 extern void u_printf(const char *, ...);
+extern int memcmp(const void *, const void *, size_t);
 extern int strcmp(const char *, const char *);
 
 #define ROUNDS 4000
@@ -271,6 +272,23 @@ static int timeout_read(bool expect_error) {
     return 0;
 }
 
+static int flush_retry(bool recovered) {
+    int fd = open("/flush-proof", O_RDWR | O_APPEND, 0);
+    CHECK(fd >= 0);
+    static const char pending[] = "again\n";
+    if (recovered) {
+        CHECK(write(fd, pending, sizeof(pending) - 1) == sizeof(pending) - 1);
+        CHECK(fsync(fd) == 0);
+        u_printf("[PASS] StrataFS accepted exact retry after remount\n");
+    } else {
+        CHECK(write(fd, pending, sizeof(pending) - 1) == -STRATUM_EIO);
+        CHECK(fsync(fd) == -STRATUM_EIO);
+        u_printf("[PASS] Backend flush failure surfaced as EIO and stopped further commits\n");
+    }
+    CHECK(close(fd) == 0);
+    return 0;
+}
+
 static int tmpfs_campaign(void) {
     const char *source = "/tmp/room/scratch";
     const char *target = "/tmp/note";
@@ -302,6 +320,8 @@ static int tmpfs_campaign(void) {
 
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "tmpfs")) return tmpfs_campaign();
+    if (argc == 2 && !strcmp(argv[1], "flush-retry")) return flush_retry(false);
+    if (argc == 2 && !strcmp(argv[1], "flush-recovered")) return flush_retry(true);
     if (argc == 2 && !strcmp(argv[1], "timeout-prepare")) return timeout_prepare();
     if (argc == 2 && !strcmp(argv[1], "timeout-read")) return timeout_read(true);
     if (argc == 2 && !strcmp(argv[1], "timeout-retry")) return timeout_read(false);
