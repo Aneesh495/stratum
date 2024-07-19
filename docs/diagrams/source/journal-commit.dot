@@ -1,0 +1,21 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Journal commit and durable acknowledgment"];
+    tx [label="Transaction owns dirty block copies"];
+    payload [label="Write descriptor and payload, then flush"];
+    commit [label="Write and flush commit record"];
+    publish [label="Publish replay range and flush"];
+    home [label="Apply home blocks and flush"];
+    clear [label="Clear replay range and flush"];
+    ack [label="Application may acknowledge after fsync"];
+    stop [label="I/O error stops mutations until remount"];
+
+    tx -> payload [label="Bounded reservation"];
+    payload -> commit [label="Ordered"];
+    commit -> publish [label="Checksummed"];
+    publish -> home [label="Replayable"];
+    home -> clear [label="Checkpoint"];
+    clear -> ack [label="Success"];
+    payload -> stop [label="Failed barrier"];
+    publish -> stop [label="Uncertain commit"];
+}

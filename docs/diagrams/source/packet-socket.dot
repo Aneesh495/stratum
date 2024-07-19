@@ -1,0 +1,26 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Ethernet receive and bounded TCP state"];
+    rx [label="Virtio RX and network worker"];
+    eth [label="Ethernet demux"];
+    ip [label="IPv4 validation"];
+    arp [label="ARP neighbor table"];
+    udp [label="UDP or ICMP"];
+    syn [label="SYN sent/received"];
+    est [label="Established: receive reorder and four TX slots"];
+    close [label="Half-close and FIN exchange"];
+    socket [label="Descriptor poll and native I/O"];
+    bad [label="Reject malformed/fragmented input"];
+
+    rx -> eth [label="Actual frame"];
+    eth -> arp [label="ARP"];
+    eth -> ip [label="IPv4"];
+    ip -> bad [label="Invalid"];
+    ip -> udp [label="UDP/ICMP"];
+    ip -> syn [label="TCP SYN"];
+    syn -> est [label="Handshake ACK"];
+    est -> est [label="ACK, timeout or retransmit"];
+    est -> socket [label="Readable/writable"];
+    est -> close [label="FIN"];
+    close -> socket [label="EOF"];
+}

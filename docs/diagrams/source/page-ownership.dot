@@ -1,0 +1,25 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Physical pages and COW ownership"];
+    pmm [label="PMM free frame"];
+    anon [label="Private anonymous mapping"];
+    fault [label="First access faults"];
+    resident [label="Zeroed frame with one owner"];
+    fork [label="fork shares resident frame read-only"];
+    copy [label="Child write fault allocates private copy"];
+    refs [label="Drop mapping reference on exit/unmap"];
+    tlb [label="Invalidate translations before reuse"];
+    shared [label="MAP_SHARED keeps inherited frame writable"];
+
+    pmm -> fault [label="Allocate"];
+    anon -> fault [label="Absent PTE"];
+    fault -> resident [label="Publish mapping"];
+    resident -> fork [label="Clone page tables"];
+    fork -> copy [label="COW write"];
+    fork -> refs [label="Read-only owner exits"];
+    copy -> refs [label="Separate references"];
+    refs -> tlb [label="Last owner"];
+    tlb -> pmm [label="Safe reuse"];
+    resident -> shared [label="Separate shared policy"];
+    shared -> refs [label="Reference counted"];
+}

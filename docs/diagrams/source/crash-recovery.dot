@@ -1,0 +1,24 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Recovery and allowed interruption outcomes"];
+    boot [label="Boot same disk after interrupted QEMU"];
+    header [label="Validate WAL superblock"];
+    empty [label="No published range"];
+    pending [label="Validate descriptor, targets and commit CRC"];
+    apply [label="Replay idempotent home writes"];
+    done [label="Flush and clear pending range"];
+    old [label="Old namespace retained"];
+    new [label="Committed namespace recovered"];
+    fail [label="Reject corrupt published transaction"];
+
+    boot -> header [label="Independent fixture"];
+    header -> empty [label="Range empty"];
+    header -> pending [label="Range pending"];
+    header -> fail [label="Invalid checksum"];
+    empty -> old [label="Interrupted before publish"];
+    empty -> new [label="Already checkpointed"];
+    pending -> apply [label="Valid"];
+    pending -> fail [label="Invalid"];
+    apply -> done [label="Reapply full blocks"];
+    done -> new [label="Check raw disk"];
+}

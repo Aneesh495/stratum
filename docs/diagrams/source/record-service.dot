@@ -1,0 +1,25 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Ledger request, replica and reboot recovery"];
+    tcp [label="Native TCP session"];
+    queue [label="Listener sends descriptor through pipe"];
+    worker [label="One of 32 workers checks operation"];
+    log [label="Append checksummed record and fsync"];
+    replica [label="Peer appends and flushes independently"];
+    ack [label="Return OK durable"];
+    retry [label="Same identity and value are idempotent"];
+    reboot [label="Restart scans and verifies record log"];
+    check [label="Independent checker reads both disks"];
+
+    tcp -> queue [label="Accept"];
+    queue -> worker [label="Dispatch"];
+    worker -> log [label="New identity"];
+    worker -> retry [label="Known identity"];
+    log -> replica [label="Synchronous append"];
+    retry -> replica [label="Ensure peer committed"];
+    replica -> ack [label="Peer durable"];
+    log -> reboot [label="Crash or restart"];
+    reboot -> worker [label="Rebuilt index"];
+    reboot -> check [label="Disk bytes"];
+    replica -> check [label="Replica bytes"];
+}

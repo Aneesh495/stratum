@@ -1,0 +1,23 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Scheduler task ownership"];
+    ready [label="Ready\nExactly one CPU queue"];
+    running [label="Running\nOne CPU owns the stack"];
+    blocked [label="Blocked\nWait queue or event"];
+    sleeping [label="Sleeping\nTimer queue"];
+    zombie [label="Zombie\nOutgoing stack still owned"];
+    unused [label="Unused slot"];
+    steal [label="Eligible task moved under both queue locks"];
+
+    unused -> ready [label="Create"];
+    ready -> running [label="Dequeue"];
+    running -> ready [label="Preempt or yield"];
+    ready -> steal [label="Unpinned and off CPU"];
+    steal -> running [label="Destination dispatch"];
+    running -> blocked [label="Enroll wait"];
+    running -> sleeping [label="Set deadline"];
+    blocked -> ready [label="Wake, timeout or cancellation"];
+    sleeping -> ready [label="Timer or cancellation"];
+    running -> zombie [label="Exit"];
+    zombie -> unused [label="Reclaim after context switch"];
+}

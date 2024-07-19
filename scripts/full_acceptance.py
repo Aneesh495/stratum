@@ -171,7 +171,7 @@ def run():
             host_workloads = {"host", "documentation", "benchmarks", "wait-tlb-model", "wal-model",
                               "production-fuzz", "regression"}
             for name in RUNS:
-                if name in ("image", "soak"):
+                if name in ("image", "soak", "benchmark-comparison"):
                     continue
                 if image_failed and name not in host_workloads:
                     blocked(name)
@@ -179,8 +179,10 @@ def run():
                     record(name, exercise(name))
             if soak:
                 record("soak", soak.result())
+                record("benchmark-comparison", exercise("benchmark-comparison"))
             else:
                 blocked("soak")
+                blocked("benchmark-comparison")
 
     result = finalize(dest, register, results, commit)
     verification = subprocess.run([sys.executable, "scripts/verify_evidence.py", "--inspect", str(dest)],

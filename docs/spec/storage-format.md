@@ -49,8 +49,12 @@ model exercises 5,000 simulated crash states and 1,500 corrupted states.
 ## Caching and temporary files
 
 StrataFS caches up to 16 clean disk blocks with LRU eviction. Journal
-payloads own modified copies until commit. Home writes invalidate cached
-blocks under the filesystem mutex. A timed-out block request reports an
+transactions hold a separate bounded array of pinned dirty copies.
+Reads inside a transaction see those copies first. Their capacity
+does not depend on free slots in the read cache. Home writes invalidate
+the matching clean copies under the filesystem mutex. The cache campaign
+fills the read cache, writes across two adjacent blocks in one
+transaction, and checks the exact bytes after reboot. A timed-out block request reports an
 error after reset acknowledgment. The caller owns retry policy. A failed journal flush stops further
 mutations until remount. The cache campaign injects a real backend flush
 failure, verifies the old file after reboot, and checks that a retried

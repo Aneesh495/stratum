@@ -1,0 +1,22 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Four-level address spaces"];
+    user [label="Lower canonical half\nPer-process PML4 entries"];
+    text [label="Static ELF text: user RX"];
+    data [label="ELF data and anonymous pages: user RW/NX"];
+    stack [label="User stack and unmapped guard"];
+    kernel [label="Higher canonical half\nSupervisor entries shared"];
+    image [label="Linked kernel text and read-only data"];
+    direct [label="Direct physical map with restricted aliases"];
+    mmio [label="Device MMIO mapping"];
+    switch [label="Context switch loads next CR3"];
+
+    switch -> user [label="Changes process view"];
+    switch -> kernel [label="Supervisor mappings persist"];
+    user -> text [label="Executable"];
+    user -> data [label="Demand/COW/shared"];
+    user -> stack [label="Separate VM regions"];
+    kernel -> image [label="Kernel permissions"];
+    kernel -> direct [label="RAM"];
+    kernel -> mmio [label="PCI resources"];
+}

@@ -182,6 +182,29 @@ static int open_unlinked(bool crash) {
     return 0;
 }
 
+#define CACHE_CROSS_OFFSET (47 * 4096 - 256)
+
+static int cache_cross_payload(int fd, bool write_it) {
+    char expected[512], observed[512];
+    for (unsigned i = 0; i < sizeof(expected); i++) expected[i] = (char)(i * 61 + i / 23);
+    CHECK(lseek(fd, CACHE_CROSS_OFFSET, SEEK_SET) == CACHE_CROSS_OFFSET);
+    if (write_it) {
+        CHECK(write(fd, expected, sizeof(expected)) == sizeof(expected) && fsync(fd) == 0);
+        CHECK(lseek(fd, CACHE_CROSS_OFFSET, SEEK_SET) == CACHE_CROSS_OFFSET);
+    }
+    CHECK(read(fd, observed, sizeof(observed)) == sizeof(observed));
+    CHECK(memcmp(observed, expected, sizeof(observed)) == 0);
+    return 0;
+}
+
+static int cache_reopen(void) {
+    int fd = open("/cache", O_RDONLY, 0);
+    CHECK(fd >= 0 && cache_cross_payload(fd, false) == 0);
+    CHECK(close(fd) == 0 && unlink("/cache") == 0);
+    u_printf("[PASS] Two pinned dirty blocks recovered with exact bytes after reboot\n");
+    return 0;
+}
+
 static int cache_campaign(void) {
     uint64_t before_irqs = strat_blk_irq_wakes();
     int fd;
@@ -200,15 +223,11 @@ static int cache_campaign(void) {
             CHECK(read(fd, &value, 1) == 1 && value == 'a' + i % 26);
         }
     }
-    CHECK(lseek(fd, 47 * 4096, SEEK_SET) == 47 * 4096);
-    CHECK(write(fd, "!", 1) == 1 && fsync(fd) == 0);
-    char observed;
-    CHECK(lseek(fd, 47 * 4096, SEEK_SET) == 47 * 4096);
-    CHECK(read(fd, &observed, 1) == 1 && observed == '!');
+    CHECK(cache_cross_payload(fd, true) == 0);
     CHECK(strat_fs_cache(&after) == 0);
     CHECK(after.hits > before.hits && after.misses >= before.misses + 48 &&
-          after.evictions >= before.evictions + 32 && after.invalidations > before.invalidations);
-    CHECK(close(fd) == 0 && unlink("/cache") == 0);
+          after.evictions >= before.evictions + 32 && after.invalidations >= before.invalidations + 2);
+    CHECK(close(fd) == 0);
     uint64_t wakes = strat_blk_irq_wakes() - before_irqs;
     CHECK(wakes > 0);
     u_printf("[PASS] Block MSI-X woke %lu waiting operations\n", wakes);
@@ -325,6 +344,7 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "timeout-prepare")) return timeout_prepare();
     if (argc == 2 && !strcmp(argv[1], "timeout-read")) return timeout_read(true);
     if (argc == 2 && !strcmp(argv[1], "timeout-retry")) return timeout_read(false);
+    if (argc == 2 && !strcmp(argv[1], "cache-reopen")) return cache_reopen();
     if (argc == 2 && !strcmp(argv[1], "cache")) return cache_campaign();
     if (argc == 2 && !strcmp(argv[1], "alloc-fail")) return allocation_failure();
     if (argc == 2 && !strcmp(argv[1], "namespace")) {

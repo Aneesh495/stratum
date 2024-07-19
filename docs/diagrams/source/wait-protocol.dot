@@ -1,0 +1,23 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Blocking wait, notification and cancellation"];
+    test [label="Check predicate under its lock"];
+    enrol [label="Publish waiter before releasing lock"];
+    block [label="Deschedule on its kernel stack"];
+    claim [label="One event owns waiter removal"];
+    notify [label="Readiness or peer close"];
+    deadline [label="Monotonic deadline reached"];
+    cancel [label="Cancellation requests unwind"];
+    ready [label="Enqueue once and recheck predicate"];
+    io [label="Uninterruptible DMA retains references"];
+
+    test -> enrol [label="Cannot progress"];
+    enrol -> block [label="Commit waiter"];
+    notify -> claim [label="Locked selection"];
+    deadline -> claim [label="Expired"];
+    cancel -> claim [label="Interruptible wait"];
+    cancel -> io [label="Defer"];
+    io -> notify [label="Device completes or resets"];
+    claim -> ready [label="Wake once"];
+    ready -> test [label="Continue or return error"];
+}

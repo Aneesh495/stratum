@@ -1,0 +1,22 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Lock dependencies and execution contexts"];
+    irq [label="Hard IRQ"];
+    ready [label="Readiness/event spinlock"];
+    rq [label="Runqueue spinlock"];
+    worker [label="Kernel worker or user syscall"];
+    vfs [label="Open-file offset mutex"];
+    fs [label="StrataFS mutex"];
+    blk [label="Virtio block request mutex"];
+    dma [label="Queue lock and DMA ownership"];
+    pmm [label="Slab cache lock to PMM spinlock"];
+
+    irq -> ready [label="Notify only"];
+    ready -> rq [label="Enqueue wake"];
+    worker -> vfs [label="May sleep"];
+    vfs -> fs [label="Filesystem operation"];
+    fs -> blk [label="Journal or block I/O"];
+    blk -> dma [label="Publish/reap chain"];
+    worker -> pmm [label="Bounded allocator"];
+    irq -> dma [label="Completion flag only"];
+}

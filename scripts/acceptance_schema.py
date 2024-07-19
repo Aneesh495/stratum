@@ -1,11 +1,12 @@
 """Versioned commands and fixed gate coverage shared by evidence tools."""
 
-SCHEMA = 3
+SCHEMA = 4
+BENCHMARK_BASELINE = "b124e4f4ac333c16da199cd94a2bf13fa31beb15"
 # Keys correspond to docs/ACCEPTANCE_PLAN.md. A workload exit alone cannot clear a gap.
 GATES = {
     "A01": ("boot", "framebuffer", "entry-stacks"),
     "A02": ("host", "diagnostics", "shared", "tlb", "resource-limits"),
-    "A03": ("threads", "cancellation", "wait-tlb-model"),
+    "A03": ("threads", "cancellation", "deadlines", "wait-tlb-model"),
     "A04": ("exec", "threads", "cancellation", "supervision"),
     "A05": ("ipc", "cancellation"),
     "A06": ("block-wrap", "block-errors", "block-timeout", "net-wrap"),
@@ -14,10 +15,10 @@ GATES = {
     "A09": ("service",),
     "A10": ("soak",),
     "A11": ("production-fuzz", "wait-tlb-model"),
-    "A12": ("regression", "benchmarks", "guest-bench", "trace", "documentation"),
+    "A12": ("regression", "benchmarks", "guest-bench", "benchmark-comparison", "trace", "documentation"),
 }
 GAPS = {
-    "A12": "Complete capability evidence, guest performance comparisons, and hosted release verification",
+    "A12": "Hosted branch, CI, and release verification",
 }
 
 
@@ -37,6 +38,7 @@ RUNS = {
     "shared": (python("scripts/test_shared.py"), 300, ("shared/*",)),
     "tlb": (python("scripts/test_tlb.py"), 400, ("tlb/*",)),
     "threads": (python("scripts/test_threads.py"), 400, ("threads/*",)),
+    "deadlines": (python("scripts/test_deadlines.py"), 150, ("deadlines/*",)),
     "cancellation": (python("scripts/test_cancel.py"), 900, ("cancellation/*",)),
     "exec": (python("scripts/test_exec.py"), 400, ("exec/*",)),
     "supervision": (python("scripts/test_supervision.py"), 120, ("supervision/*",)),
@@ -66,6 +68,8 @@ RUNS = {
     "regression": (("make", "evidence"), 1800, ("evidence/20*/**/*",)),
     "benchmarks": (("make", "bench"), 300, ("host-benchmarks.log",)),
     "guest-bench": (python("scripts/test_guest_bench.py"), 900, ("guest-bench/*",)),
+    "benchmark-comparison": (python("scripts/compare_benchmarks.py", BENCHMARK_BASELINE), 1800,
+                             ("benchmark-comparison/**/*",)),
     "trace": (python("scripts/test_trace.py"), 120, ("trace/*",)),
     "documentation": (("make", "docs"), 90, ()),
 }
