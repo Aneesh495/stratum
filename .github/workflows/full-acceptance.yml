@@ -1,0 +1,90 @@
+name: Stratum full acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Full SHA of the published Stratum execution commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Validate the execution reference
+        env:
+          SOURCE: ${{ inputs.source }}
+        run: |
+          [[ "$SOURCE" =~ ^[a-f0-9]{40}$ ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm the execution commit is published on main
+        env:
+          SOURCE: ${{ inputs.source }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          git merge-base --is-ancestor "$SOURCE" refs/remotes/origin/main
+      - name: Install host tools
+        timeout-minutes: 10
+        run: |
+          sources="$RUNNER_TEMP/stratum-ubuntu.list"
+          cat > "$sources" <<'SOURCES'
+          deb https://archive.ubuntu.com/ubuntu noble main universe
+          deb https://archive.ubuntu.com/ubuntu noble-updates main universe
+          deb https://security.ubuntu.com/ubuntu noble-security main universe
+          SOURCES
+          options=(-o "Dir::Etc::sourcelist=$sources" -o Dir::Etc::sourceparts=-)
+          options+=(-o Acquire::Languages=none -o Acquire::Retries=2 -o Acquire::https::Timeout=25)
+          sudo apt-get "${options[@]}" update
+          sudo apt-get "${options[@]}" install -y --no-install-recommends \
+            clang lld libclang-rt-dev nasm qemu-system-x86 ovmf mtools libarchive-tools
+      - name: Install pinned reference fixtures
+        timeout-minutes: 10
+        run: |
+          cd "$RUNNER_TEMP"
+          zig_archive=zig-x86_64-linux-0.16.0.tar.xz
+          alpine_iso=alpine-virt-3.22.8-x86_64.iso
+          curl --fail --silent --show-error --location --retry 3 --max-time 180 \
+            "https://ziglang.org/download/0.16.0/$zig_archive" -o "$zig_archive"
+          curl --fail --silent --show-error --location --retry 3 --max-time 180 \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/$alpine_iso" -o "$alpine_iso"
+          printf '%s  %s\n' 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 "$zig_archive" \
+            93ccf2243ee4fc19c78063774f92ff3d328390bae76bda5bfeaf42db46ce5059 "$alpine_iso" | sha256sum -c -
+          tar -xf "$zig_archive"
+          printf '%s\n' "$RUNNER_TEMP/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+          printf 'STRATUM_REFERENCE_ISO=%s/%s\n' "$RUNNER_TEMP" "$alpine_iso" >> "$GITHUB_ENV"
+      - name: Run and verify the fixed workloads
+        timeout-minutes: 150
+        run: |
+          make doctor docs
+          mkdir -p build
+          if make acceptance > build/hosted-acceptance.log 2>&1; then
+            echo "The local acceptance runner reported success."
+          fi
+          cat build/hosted-acceptance.log
+          bundle=$(sed -n 's/^Acceptance evidence: //p' build/hosted-acceptance.log)
+          test -n "$bundle"
+          test -f "$bundle/ACCEPTANCE.json"
+          python3 scripts/verify_evidence.py --inspect "$bundle"
+          make test-acceptance-controls EVIDENCE="$bundle"
+          make release EVIDENCE="$bundle"
+      - name: Preserve the exact execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stratum-acceptance-${{ inputs.source }}
+          path: |
+            build/hosted-acceptance.log
+            build/acceptance/run-*
+            build/release/*.tar.gz
+          if-no-files-found: warn
+          compression-level: 2
+          retention-days: 30
