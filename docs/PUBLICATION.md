@@ -18,3 +18,5 @@ commit and workflow publication commit distinct in release notes.
 The hosted job pins the reference ISO and Zig archive by SHA-256. Its
 environment record identifies the actual runner tools and firmware.
 [Zig release index](https://ziglang.org/download/index.json) · [Alpine release archive](https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/)
+
+The [local qualification report](evidence/f0a3dc8.md) identifies the execution commit and checksums.
