@@ -5,8 +5,8 @@ Execution commit `f0a3dc824a8867e7f29bafe9fb76e434b726db64`.
 All 40 fixed commands completed successfully on the reference macOS arm64
 TCG host. Independent verification passed A01 through A11. The verifier
 rejected all 13 deliberate corruptions of the sealed bundle and verified
-the original again afterward. A12 awaits hosted branch, CI, and release
-verification.
+the original again afterward. Hosted verification and release publication
+completed after this local run. [Hosted run](https://github.com/Aneesh495/stratum/actions/runs/42530758442) · [Release](https://github.com/Aneesh495/stratum/releases/tag/v0.1.0)
 
 | Observation | Verified result |
 | --- | --- |

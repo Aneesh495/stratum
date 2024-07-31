@@ -6,20 +6,26 @@ capability results under `build/acceptance/`. `make verify EVIDENCE=path`
 requires complete evidence. `make evidence` runs the smaller regression
 suite and verifies reproducibility in two isolated builds.
 
-| Gate | Observed coverage | Remaining release work |
-| --- | --- | --- |
-| A01 | 45 fresh boots, 128 rejected inputs, debugger entry observations, PS/2 input, exact framebuffer glyphs, and nested protected stacks on 1, 4 and 8 CPUs | Combined run on final source |
-| A02 | 2 million model operations, 51,200 guest demand faults, 10,000 mapping replacements per CPU profile, shared mapping and COW tests, real 64 MiB allocator exhaustion, slab rollback, and object reuse | Combined run on final source |
-| A03 | 512 simultaneous workers across 32 processes on each of 4 and 8 CPUs, over a million runnable switches per profile, 10,000 futex cases, bounded worker completion, and 4,096 deadline checks with observed CPU migrations per profile | Combined run on final source |
-| A04 | 10,000 fork/exec/wait cycles, 25,000 thread cycles, 10,000 boundary cases, 10,008 targeted cancellations, 256 group exits on each of 4 and 8 CPUs, and native shell supervision on two memory profiles | Combined run on final source |
-| A05 | 100,000 verified transfers, 25,000 readiness races, 2,500 socket poll races, and 32 orphan reaps per profile | Combined run on final source |
-| A06 | Block and network index wraps, 500 block saturations, 500 PCI resets, 1,000 backend errors, real MSI-X completions, and bounded timeout recovery | Combined run on final source |
-| A07 | 128,006 mixed operations, 5,000 modeled crashes, 100 VM interruptions, independent namespace checks, cache pressure, allocation rollback, pinned dirty copies under cache pressure, and injected flush failure with remount and retry | Combined run on final source |
-| A08 | 150,000 exact UDP echoes, 1,000 TCP sessions, 316,211,200 TCP bytes, 200 impaired sessions, and 10,000 invalid frames on `cdcc41f`. Separate direct Linux interoperability, deterministic fast retransmission, ICMP and socket capacity tests | Combined run on final TCP implementation |
-| A09 | 32 native clients, 100,000 requests, 10,000 records checked on both disks, and ten primary interruptions on `cdcc41f` | Combined run on final source |
-| A10 | 21,030 mixed rounds in 3,600 seconds on `92e2c38`, with quiescent resources reconciled | Rerun on final source |
-| A11 | 1,470,633,393 completed production parser mutations across six targets on `cdcc41f`, each for at least 600 seconds | Combined run on final source |
-| A12 | Two isolated artifact builds and 14 regression verifier controls. Native benchmark samples on two profiles, independent raw workload checks, and capability-to-artifact bindings | Matched baseline rerun, full verifier controls, and hosted release |
+Stratum v0.1.0 completed all 12 acceptance gates. The tagged execution
+commit is `f0a3dc824a8867e7f29bafe9fb76e434b726db64`. All 40 fixed
+commands passed on the hosted Ubuntu runner.
+
+[Full hosted acceptance](https://github.com/Aneesh495/stratum/actions/runs/42530758442) · [Standard CI](https://github.com/Aneesh495/stratum/actions/runs/42530752144) · [Release](https://github.com/Aneesh495/stratum/releases/tag/v0.1.0)
+
+| Gate | Verified coverage |
+| --- | --- |
+| A01 | 45 fresh boots, 128 rejected inputs, debugger entry observations, PS/2 input, exact framebuffer glyphs, and nested protected stacks on 1, 4 and 8 CPUs |
+| A02 | 2 million model operations, 51,200 guest demand faults, 10,000 mapping replacements per CPU profile, shared mapping and COW tests, real 64 MiB allocator exhaustion, slab rollback, and object reuse |
+| A03 | 512 simultaneous workers across 32 processes on each of 4 and 8 CPUs, over a million runnable switches per profile, 10,000 futex cases, bounded worker completion, and 4,096 deadline checks with observed CPU migrations per profile |
+| A04 | 10,000 fork/exec/wait cycles, 25,000 thread cycles, 10,000 boundary cases, 10,008 targeted cancellations, 256 group exits on each of 4 and 8 CPUs, and native shell supervision on two memory profiles |
+| A05 | 100,000 verified transfers, 25,000 readiness races, 2,500 socket poll races, and 32 orphan reaps per profile |
+| A06 | Block and network index wraps, 500 block saturations, 500 PCI resets, 1,000 backend errors, real MSI-X completions, and bounded timeout recovery |
+| A07 | 128,006 mixed operations, 5,000 modeled crashes, 100 VM interruptions, independent namespace checks, cache pressure, allocation rollback, pinned dirty copies under cache pressure, and injected flush failure with remount and retry |
+| A08 | 150,000 exact UDP echoes, 1,000 TCP sessions, 316,211,200 TCP bytes, 200 impaired sessions, and 10,000 invalid frames. Separate direct Linux interoperability, deterministic fast retransmission, ICMP and socket capacity tests |
+| A09 | 32 native clients, 100,000 requests, 10,000 records checked on both disks, and ten primary interruptions |
+| A10 | 11,056 mixed rounds in 3,600.1 seconds on 8 vCPUs and 1 GiB, with quiescent resources reconciled |
+| A11 | 523,692,845 completed production parser mutations across six targets, each for at least 600 seconds |
+| A12 | Matched baseline benchmark, two reproducible builds, 13 full verifier controls, and byte-for-byte verification of the public release downloads |
 
 The original smoke reports and synthetic benchmark table are preserved in Git
 history. The [benchmark harness](../bench/results.md) keeps host and guest

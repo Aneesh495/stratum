@@ -2,6 +2,8 @@
 
 Stratum boots an x86-64 kernel through its own UEFI loader. In QEMU, the kernel starts application processors, schedules native Ring 3 programs, and exposes a serial shell. StrataFS stores files through virtio-blk, and the guest network stack carries a small durable record service through virtio-net.
 
+[Download Stratum v0.1.0](https://github.com/Aneesh495/stratum/releases/tag/v0.1.0) · [Hosted acceptance](https://github.com/Aneesh495/stratum/actions/runs/42530758442)
+
 ## Run it
 
 On Ubuntu 24.04:
@@ -69,4 +71,4 @@ maps each workload to its raw evidence.
 | `make evidence` | Tests and two clean builds from the committed source |
 | `make verify EVIDENCE=path` | Read-only validation of a regression or full acceptance bundle |
 
-See the [verification status](docs/BUILD_STATUS.md) and [full acceptance targets](docs/ACCEPTANCE_PLAN.md) for coverage and open work. The supported execution target is QEMU x86-64. The kernel supports static ELF executables, CPU-local user threads with TLS, and a bounded IPv4 stack. Physical hardware, full POSIX compatibility, and the complete acceptance workloads remain unverified.
+See the [verification status](docs/BUILD_STATUS.md) and [full acceptance targets](docs/ACCEPTANCE_PLAN.md) for release coverage and test definitions. The supported execution target is QEMU x86-64. The kernel supports static ELF executables, CPU-local user threads with TLS, and a bounded IPv4 stack.
