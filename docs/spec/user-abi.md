@@ -46,15 +46,22 @@ and consumes its result. An invalid status pointer returns `EFAULT`
 without consuming the result. At most 32 outstanding worker IDs are
 supported per process. The scheduler frees the worker stack after it has
 switched away. The last thread releases the process descriptors and
-address space. The original thread's return status is used by `waitpid`.
+address space. `waitpid` returns the process exit status. A thread returning from its entry function exits just that thread.
 Live orphans are adopted by init and reaped automatically.
 
 A process and all its workers stay on one CPU after creating the first
 worker. Separate processes can run on different CPUs. `strat_fork_on_cpu`
 selects a CPU for a child, `strat_getcpu` reports the executing CPU, and
 `strat_sched_switches` reports switches between distinct runnable user
-tasks per CPU. Cross-CPU siblings, process-wide cancellation, and
-file-backed mapping are pending.
+tasks per CPU. Cross-CPU siblings and file-backed mapping are outside the
+current ABI.
+
+`strat_thread_cancel(tid)` requests cancellation of a worker in the caller's
+process. The worker exits with `-EINTR` after unwinding interruptible waits
+and outstanding system-call references. `strat_thread_join` reaps the result.
+`exit(status)` requests process exit from any thread and cancels its siblings.
+The last thread releases the shared process state. Block I/O keeps its
+buffers and lock ownership until the device has completed or reset.
 
 A futex key is a process and a four-byte-aligned user address. A wait
 checks the expected word and enrolls as one operation relative to sibling
@@ -75,7 +82,7 @@ causes reads to return EOF after queued data and writes to return `EPIPE`.
 
 `poll` reports `POLLNVAL` if an observed descriptor is closed or replaced.
 Descriptor generations prevent a waiter from following a recycled number.
-Readiness changes in IPC, serial input, and the network stack wake
+Readiness changes in IPC, serial or keyboard input, and the network stack wake
 waiters to rescan. Deadlines and notifications use the same scheduler
 wait mechanism. Console input falls back to timed checks when the I/O
 APIC cannot route the serial interrupt.

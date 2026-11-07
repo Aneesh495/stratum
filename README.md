@@ -52,10 +52,13 @@ The service acknowledges an append after the guest filesystem flushes it. Identi
 | `make test-ipc` | 100,000 pipe and channel transfers, 25,000 readiness cases, and descriptor/page reconciliation per profile |
 | `make test-tlb` | 10,000 shared kernel mapping replacements with per-CPU reads, writes, and retired frame checks per profile |
 | `make test-abi test-storage test-faults` | Guest ABI, COW, pipes, filesystem paths, and deliberate trap handling |
-| `make test-drivers` | 150,000 virtio-blk reads with two full ring wraps |
+| `make test-drivers test-block-timeout` | Block queue wraps, pressure, reset, I/O errors, and a real delayed request |
 | `make test-storage-mixed` | 128,006 mixed filesystem operations, reboot verification, six corrupt namespace checks, and the WAL model |
 | `make test-storage-crash` | 100 forced VM interruptions across ten WAL stages |
+| `make test-framebuffer test-trace test-tmpfs` | PS/2 and framebuffer pixels, trace overflow, and volatile mount lifetime |
+| `make bench-guest` | Raw native samples and paired vCPU profiles |
+| `make acceptance` | Fixed campaigns on a frozen checkout, including a one-hour soak |
 | `make evidence` | Tests and two clean builds from the committed source |
-| `make verify` | Read-only validation of a generated regression bundle |
+| `make verify EVIDENCE=path` | Read-only validation of a regression or full acceptance bundle |
 
 See the [verification status](docs/BUILD_STATUS.md) and [full acceptance targets](docs/ACCEPTANCE_PLAN.md) for coverage and open work. The supported execution target is QEMU x86-64. The kernel supports static ELF executables, CPU-local user threads with TLS, and a bounded IPv4 stack. Physical hardware, full POSIX compatibility, and the complete acceptance workloads remain unverified.

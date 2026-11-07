@@ -6,13 +6,12 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import platform
-import shutil
 import subprocess
 import sys
 import tempfile
 import time
 
-from evidence_format import ARTIFACTS, COMMANDS, REQUIRED_TRANSCRIPTS, SCHEMA, file_hash
+from evidence_format import ARTIFACTS, COMMANDS, REQUIRED_TRANSCRIPTS, SCHEMA, copy_artifact, file_hash
 
 
 def git(*args):
@@ -43,7 +42,7 @@ def copy_outputs(source, dest, files):
             continue  # Missing evidence is rejected by the verifier.
         target = dest / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(origin, target)
+        copy_artifact(origin, target)
 
 
 def main():

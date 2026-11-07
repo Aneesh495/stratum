@@ -1,6 +1,7 @@
 """Paths and commands in the versioned regression evidence format."""
 
 from hashlib import sha256
+import shutil
 
 
 SCHEMA = 6
@@ -50,3 +51,17 @@ def file_hash(path):
         while chunk := data.read(65536):
             h.update(chunk)
         return h.hexdigest()
+
+
+def copy_artifact(source, destination):
+    if source.suffix != ".img":
+        shutil.copyfile(source, destination)
+        return
+    # Preserve logical bytes of sparse image templates without allocating their holes.
+    with source.open("rb") as original, destination.open("wb") as copy:
+        while chunk := original.read(65536):
+            if chunk.count(0) == len(chunk):
+                copy.seek(len(chunk), 1)
+            else:
+                copy.write(chunk)
+        copy.truncate()

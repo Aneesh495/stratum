@@ -115,6 +115,7 @@ def verify(root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", nargs="?", type=Path)
+    parser.add_argument("--inspect", action="store_true", help="check integrity and completed gates of a full bundle")
     args = parser.parse_args()
     root = args.bundle
     if root is None:
@@ -128,14 +129,16 @@ def main():
         if full:
             from verify_acceptance import verify as verify_full
 
-            verify_full(root)
+            complete = verify_full(root, require_complete=not args.inspect)
         else:
             verify(root)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"Evidence rejected: {error}", file=sys.stderr)
         return 1
-    if full:
+    if full and complete:
         print(f"Verified full acceptance bundle {root}.")
+    elif full:
+        print(f"Verified integrity and completed gates for {root}. Full acceptance remains incomplete.")
     else:
         print(f"Verified regression bundle {root}. Full acceptance remains unverified.")
     return 0

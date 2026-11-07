@@ -20,7 +20,7 @@ DATA_DISK := $(BUILD_DIR)/images/stratum-data.img
 
 .PHONY: all bootstrap doctor build image run debug test smoke test-boot test-mm test-smp \
         test-sched test-abi test-drivers test-storage test-storage-crash test-net test-net-wrap test-tcp-campaign test-net-reject test-service test-faults fuzz fuzz-production soak bench \
-        docs scope-check demo evidence acceptance verify release clean
+        docs scope-check demo evidence acceptance verify test-acceptance-controls release clean
 
 all: image
 
@@ -115,6 +115,11 @@ test-net-reject: image
 test-service: image
 	@$(PYTHON) scripts/test_ledger_load.py
 
+EXTRA_GUEST_TESTS = cancel block-timeout storage-cache tmpfs trace framebuffer tcp-reference tcp-recovery
+.PHONY: $(addprefix test-,$(EXTRA_GUEST_TESTS))
+$(addprefix test-,$(EXTRA_GUEST_TESTS)): image
+	@$(PYTHON) scripts/test_$(subst -,_,$(patsubst test-%,%,$@)).py
+
 fuzz-production:
 	@$(PYTHON) scripts/fuzz_production.py
 
@@ -123,6 +128,10 @@ fuzz:
 
 soak: image
 	@$(PYTHON) scripts/test_soak.py
+
+.PHONY: bench-guest
+bench-guest: image
+	@$(PYTHON) scripts/test_guest_bench.py
 
 bench:
 	@$(PYTHON) scripts/run_benchmarks.py
@@ -140,7 +149,10 @@ acceptance:
 	@$(PYTHON) scripts/run_acceptance.py
 
 verify:
-	@$(PYTHON) scripts/verify_evidence.py "$(EVIDENCE)"
+	@$(PYTHON) scripts/verify_evidence.py $(if $(EVIDENCE),"$(EVIDENCE)")
+
+test-acceptance-controls:
+	@$(PYTHON) scripts/test_acceptance_controls.py "$(EVIDENCE)"
 
 release: acceptance
 
