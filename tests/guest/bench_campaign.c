@@ -96,7 +96,11 @@ static int storage_runs(void) {
         if (lseek(fd, 0, SEEK_SET)) return 5;
         start = counter();
         for (unsigned page = 0; page < READ_BLOCKS; page++) {
-            if (read(fd, block, BLOCK) != BLOCK) return 6;
+            for (size_t filled = 0; filled < BLOCK;) {
+                int64_t received = read(fd, block + filled, BLOCK - filled);
+                if (received <= 0) return 6;
+                filled += (size_t)received;
+            }
             for (unsigned i = 0; i < BLOCK; i++) if (block[i] != pattern(run, page, i)) return 7;
         }
         if (run >= WARMUP) sample("block_read", run - WARMUP, start, READ_BLOCKS * BLOCK);
