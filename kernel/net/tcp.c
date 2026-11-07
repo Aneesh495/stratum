@@ -12,10 +12,12 @@
 #define TCP_BACKLOG_LIMIT 32
 #define TCP_RETRY_MS 250
 #define TCP_RETRY_LIMIT 6
+#define TCP_CLOSE_MS 5000
 
 static tcp_pcb_t *connections;
 static spinlock_t tcp_lock = SPINLOCK_INIT;
 static unsigned connection_count;
+static uint64_t fast_retransmits;
 static uint16_t next_port = 49152;
 static uint32_t next_iss = 100000;
 
@@ -86,24 +88,72 @@ static int output(tcp_pcb_t *pcb, uint32_t seq, uint8_t flags, const void *data,
     return res;
 }
 
+static size_t send_space(const tcp_pcb_t *pcb) {
+    uint32_t in_flight = pcb->snd_nxt - pcb->snd_una;
+    if (pcb->tx_count >= pcb->tx_cwnd || in_flight >= pcb->snd_wnd) return 0;
+    return pcb->snd_wnd - in_flight;
+}
+
 static int send_tracked(tcp_pcb_t *pcb, uint8_t flags, const void *data, size_t len) {
+    if (pcb->tx_count == TCP_TX_SLOTS) return -STRATUM_EAGAIN;
     int res = output(pcb, pcb->snd_nxt, flags, data, len);
     /* ARP initiated resolution. Retry the SYN when the next-hop address is known. */
     if (res != 0 && !(res == -STRATUM_ENOENT && (flags & TCP_FLAG_SYN))) return res;
-    if (len) memcpy(pcb->tx_data, data, len);
-    pcb->tx_flags = flags;
-    pcb->tx_len = (uint16_t)len;
+    tcp_tx_segment_t *segment = &pcb->tx[(pcb->tx_first + pcb->tx_count) % TCP_TX_SLOTS];
+    segment->sequence = pcb->snd_nxt;
+    segment->flags = flags;
+    segment->length = (uint16_t)len;
+    if (len) memcpy(segment->data, data, len);
     pcb->snd_nxt += (uint32_t)len + ((flags & (TCP_FLAG_SYN | TCP_FLAG_FIN)) ? 1U : 0U);
-    pcb->retry_at = timer_get_uptime_ms() + TCP_RETRY_MS;
-    pcb->retries = 0;
+    if (!pcb->tx_count++) {
+        pcb->retry_at = timer_get_uptime_ms() + TCP_RETRY_MS;
+        pcb->retries = 0;
+    }
     return 0;
 }
 
-static void acknowledge(tcp_pcb_t *pcb, uint32_t ack, uint16_t window) {
+static void retransmit_first(tcp_pcb_t *pcb) {
+    tcp_tx_segment_t *segment = &pcb->tx[pcb->tx_first];
+    unsigned acknowledged = pcb->snd_una - segment->sequence;
+    output(pcb, pcb->snd_una, segment->flags, segment->data + acknowledged,
+           segment->length - acknowledged);
+}
+
+static void acknowledge(tcp_pcb_t *pcb, uint32_t sequence, uint32_t ack, uint16_t window, bool pure) {
     if (before(ack, pcb->snd_una) || before(pcb->snd_nxt, ack)) return;
-    pcb->snd_wnd = window;
-    /* Track one complete segment. A partial ACK leaves it eligible for retry. */
-    if (ack == pcb->snd_nxt) pcb->snd_una = ack;
+    bool duplicate = pure && ack == pcb->snd_una && pcb->tx_count && window == pcb->snd_wnd;
+    if (!pcb->snd_window_valid || before(pcb->snd_window_sequence, sequence) ||
+        (pcb->snd_window_sequence == sequence && !before(ack, pcb->snd_window_ack))) {
+        pcb->snd_window_valid = true;
+        pcb->snd_window_sequence = sequence;
+        pcb->snd_window_ack = ack;
+        pcb->snd_wnd = window;
+    }
+    if (ack == pcb->snd_una) {
+        if (duplicate && pcb->duplicate_acks < 3 && ++pcb->duplicate_acks == 3) {
+            retransmit_first(pcb);
+            __atomic_add_fetch(&fast_retransmits, 1, __ATOMIC_RELAXED);
+            pcb->tx_cwnd = pcb->tx_cwnd > 1 ? pcb->tx_cwnd / 2 : 1;
+            pcb->retry_at = timer_get_uptime_ms() + TCP_RETRY_MS;
+        }
+        return;
+    }
+    pcb->snd_una = ack;
+    pcb->duplicate_acks = 0;
+    while (pcb->tx_count) {
+        tcp_tx_segment_t *segment = &pcb->tx[pcb->tx_first];
+        uint32_t end = segment->sequence + segment->length + !!(segment->flags & (TCP_FLAG_SYN | TCP_FLAG_FIN));
+        if (before(ack, end)) break;
+        pcb->tx_first = (pcb->tx_first + 1) % TCP_TX_SLOTS;
+        pcb->tx_count--;
+        if (pcb->tx_cwnd < TCP_TX_SLOTS) pcb->tx_cwnd++;
+    }
+    pcb->retries = 0;
+    pcb->retry_at = timer_get_uptime_ms() + TCP_RETRY_MS;
+}
+
+uint64_t tcp_fast_retransmits(void) {
+    return __atomic_load_n(&fast_retransmits, __ATOMIC_RELAXED);
 }
 
 void tcp_init(void) {
@@ -146,6 +196,10 @@ static void start_connection(tcp_pcb_t *pcb, uint32_t remote_ip, uint16_t remote
     pcb->remote_port = remote_port;
     pcb->snd_nxt = next_iss += 4099;
     pcb->snd_una = pcb->snd_nxt;
+    pcb->tx_count = 0;
+    pcb->tx_cwnd = 1;
+    pcb->duplicate_acks = 0;
+    pcb->snd_window_valid = false;
 }
 
 int tcp_connect(tcp_pcb_t *pcb, uint32_t remote_ip, uint16_t remote_port) {
@@ -194,11 +248,12 @@ int64_t tcp_send(tcp_pcb_t *pcb, const void *data, size_t len) {
     spin_lock_irqsave(&tcp_lock, &flags);
     int64_t res = -STRATUM_ENOTCONN;
     if (pcb->state == TCP_STATE_ESTABLISHED || pcb->state == TCP_STATE_CLOSE_WAIT) {
+        size_t window = send_space(pcb);
         if (!len) res = 0;
-        else if (pcb->snd_una != pcb->snd_nxt || pcb->snd_wnd == 0) res = -STRATUM_EAGAIN;
+        else if (!window) res = -STRATUM_EAGAIN;
         else {
             size_t n = len < TCP_DEFAULT_MSS ? len : TCP_DEFAULT_MSS;
-            if (n > pcb->snd_wnd) n = pcb->snd_wnd;
+            if (n > window) n = window;
             int sent = send_tracked(pcb, TCP_FLAG_ACK | TCP_FLAG_PSH, data, n);
             res = sent ? sent : (int64_t)n;
         }
@@ -252,7 +307,7 @@ int tcp_poll(tcp_pcb_t *pcb, uint32_t events) {
         } else if (pcb->rx_count || receive_eof(pcb)) res |= POLLIN;
     }
     if ((events & POLLOUT) && (pcb->state == TCP_STATE_ESTABLISHED || pcb->state == TCP_STATE_CLOSE_WAIT) &&
-        pcb->snd_una == pcb->snd_nxt && pcb->snd_wnd) res |= POLLOUT;
+        send_space(pcb)) res |= POLLOUT;
     if (pcb->state == TCP_STATE_CLOSED && pcb->remote_port) res |= POLLHUP;
     spin_unlock_irqrestore(&tcp_lock, flags);
     return res;
@@ -263,7 +318,7 @@ int tcp_shutdown(tcp_pcb_t *pcb) {
     spin_lock_irqsave(&tcp_lock, &flags);
     int res = -STRATUM_ENOTCONN;
     if (pcb->state == TCP_STATE_ESTABLISHED || pcb->state == TCP_STATE_CLOSE_WAIT) {
-        if (pcb->snd_una != pcb->snd_nxt) res = -STRATUM_EAGAIN;
+        if (!send_space(pcb)) res = -STRATUM_EAGAIN;
         else {
             res = send_tracked(pcb, TCP_FLAG_FIN | TCP_FLAG_ACK, NULL, 0);
             if (res == 0) pcb->state = pcb->state == TCP_STATE_ESTABLISHED ? TCP_STATE_FIN_WAIT_1 : TCP_STATE_LAST_ACK;
@@ -288,30 +343,55 @@ int tcp_close(tcp_pcb_t *pcb) {
     if (pcb->state == TCP_STATE_ESTABLISHED || pcb->state == TCP_STATE_CLOSE_WAIT) {
         output(pcb, pcb->snd_nxt, TCP_FLAG_RST | TCP_FLAG_ACK, NULL, 0);
     }
-    remove_pcb(pcb);
+    if (pcb->tx_count && (pcb->state == TCP_STATE_FIN_WAIT_1 ||
+                          pcb->state == TCP_STATE_CLOSING || pcb->state == TCP_STATE_LAST_ACK)) {
+        pcb->detached = true;
+        pcb->close_at = timer_get_uptime_ms() + TCP_CLOSE_MS;
+    } else {
+        remove_pcb(pcb);
+    }
     spin_unlock_irqrestore(&tcp_lock, flags);
     return 0;
 }
 
 static void receive_stream(tcp_pcb_t *pcb, uint32_t seq, uint8_t flags,
                            const uint8_t *data, size_t len) {
-    if (seq != pcb->rcv_nxt || len > TCP_RING_BUF_SIZE - pcb->rx_count) {
-        output(pcb, pcb->snd_nxt, TCP_FLAG_ACK, NULL, 0);
-        return;
+    if (!len && !(flags & TCP_FLAG_FIN)) return;
+    uint32_t end = seq + (uint32_t)len;
+    uint32_t room = TCP_RING_BUF_SIZE - pcb->rx_count;
+    if ((flags & TCP_FLAG_FIN) && !before(end, pcb->rcv_nxt) &&
+        (end - pcb->rcv_nxt < room || end == pcb->rcv_nxt) && !pcb->rx_fin_pending) {
+        pcb->rx_fin_pending = true;
+        pcb->rx_fin_sequence = end;
+    }
+    if (pcb->rx_fin_pending && pcb->rx_fin_sequence - pcb->rcv_nxt < room) {
+        room = pcb->rx_fin_sequence - pcb->rcv_nxt;
     }
     for (size_t i = 0; i < len; i++) {
-        pcb->rx_buf[pcb->rx_head] = data[i];
-        pcb->rx_head = (pcb->rx_head + 1) % TCP_RING_BUF_SIZE;
+        uint32_t offset = seq + (uint32_t)i - pcb->rcv_nxt;
+        if (offset >= room) continue;
+        uint32_t slot = (pcb->rx_head + offset) % TCP_RING_BUF_SIZE;
+        uint8_t bit = 1U << (slot % 8);
+        if (!(pcb->rx_seen[slot / 8] & bit)) {
+            pcb->rx_seen[slot / 8] |= bit;
+            pcb->rx_buf[slot] = data[i];
+        }
     }
-    pcb->rx_count += (uint32_t)len;
-    pcb->rcv_nxt += (uint32_t)len;
-    if (flags & TCP_FLAG_FIN) {
+    while (room && (pcb->rx_seen[pcb->rx_head / 8] & (1U << (pcb->rx_head % 8)))) {
+        pcb->rx_seen[pcb->rx_head / 8] &= ~(1U << (pcb->rx_head % 8));
+        pcb->rx_head = (pcb->rx_head + 1) % TCP_RING_BUF_SIZE;
+        pcb->rx_count++;
+        pcb->rcv_nxt++;
+        room--;
+    }
+    if (pcb->rx_fin_pending && pcb->rcv_nxt == pcb->rx_fin_sequence) {
+        pcb->rx_fin_pending = false;
         pcb->rcv_nxt++;
         if (pcb->state == TCP_STATE_ESTABLISHED) pcb->state = TCP_STATE_CLOSE_WAIT;
         else if (pcb->state == TCP_STATE_FIN_WAIT_1) pcb->state = TCP_STATE_CLOSING;
         else if (pcb->state == TCP_STATE_FIN_WAIT_2) pcb->state = TCP_STATE_TIME_WAIT;
     }
-    if (len || (flags & TCP_FLAG_FIN)) output(pcb, pcb->snd_nxt, TCP_FLAG_ACK, NULL, 0);
+    output(pcb, pcb->snd_nxt, TCP_FLAG_ACK, NULL, 0);
 }
 
 int tcp_input(pbuf_t *p, uint32_t src_ip, uint32_t dst_ip) {
@@ -368,7 +448,7 @@ int tcp_input(pbuf_t *p, uint32_t src_ip, uint32_t dst_ip) {
         if ((packet_flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == (TCP_FLAG_SYN | TCP_FLAG_ACK) &&
             ack == pcb->snd_nxt) {
             pcb->rcv_nxt = seq + 1;
-            acknowledge(pcb, ack, window);
+            acknowledge(pcb, seq, ack, window, false);
             pcb->state = TCP_STATE_ESTABLISHED;
             output(pcb, pcb->snd_nxt, TCP_FLAG_ACK, NULL, 0);
         }
@@ -377,7 +457,7 @@ int tcp_input(pbuf_t *p, uint32_t src_ip, uint32_t dst_ip) {
     if (packet_flags & TCP_FLAG_SYN) {
         if (seq + 1 == pcb->rcv_nxt) {
             if (pcb->state == TCP_STATE_SYN_RECEIVED) {
-                output(pcb, pcb->snd_una, pcb->tx_flags, NULL, 0);
+                retransmit_first(pcb);
             } else output(pcb, pcb->snd_nxt, TCP_FLAG_ACK, NULL, 0);
         }
         goto out;
@@ -387,7 +467,7 @@ int tcp_input(pbuf_t *p, uint32_t src_ip, uint32_t dst_ip) {
         if (ack != pcb->snd_nxt || seq != pcb->rcv_nxt) goto out;
         pcb->state = TCP_STATE_ESTABLISHED;
     }
-    acknowledge(pcb, ack, window);
+    acknowledge(pcb, seq, ack, window, packet_flags == TCP_FLAG_ACK && p->len == header_len);
     if (pcb->snd_una == pcb->snd_nxt) {
         if (pcb->state == TCP_STATE_FIN_WAIT_1) pcb->state = TCP_STATE_FIN_WAIT_2;
         else if (pcb->state == TCP_STATE_CLOSING) pcb->state = TCP_STATE_TIME_WAIT;
@@ -416,11 +496,15 @@ void tcp_tick(void) {
                 pcb->state = TCP_STATE_CLOSED;
                 closed = true;
             } else {
-                output(pcb, pcb->snd_una, pcb->tx_flags, pcb->tx_data, pcb->tx_len);
+                retransmit_first(pcb);
+                pcb->tx_cwnd = 1;
+                pcb->duplicate_acks = 0;
                 pcb->retry_at = now + ((uint64_t)TCP_RETRY_MS << (pcb->retries > 3 ? 3 : pcb->retries));
             }
         }
-        if (pcb->state == TCP_STATE_CLOSED && pcb->listener) {
+        if (pcb->detached && (pcb->state == TCP_STATE_CLOSED || !pcb->tx_count || now >= pcb->close_at)) {
+            remove_pcb(pcb);
+        } else if (pcb->state == TCP_STATE_CLOSED && pcb->listener) {
             pcb->listener->backlog_count--;
             remove_pcb(pcb);
         }

@@ -12,7 +12,7 @@
 
 #define TCP_HLEN            20
 #define TCP_DEFAULT_MSS     1460
-#define TCP_DEFAULT_WND     8192
+#define TCP_TX_SLOTS        4
 
 #define TCP_RING_BUF_SIZE   16384
 
@@ -41,6 +41,13 @@ typedef enum tcp_state {
     TCP_STATE_TIME_WAIT
 } tcp_state_t;
 
+typedef struct tcp_tx_segment {
+    uint32_t sequence;
+    uint16_t length;
+    uint8_t flags;
+    uint8_t data[TCP_DEFAULT_MSS];
+} tcp_tx_segment_t;
+
 typedef struct tcp_pcb {
     uint32_t          local_ip;
     uint16_t          local_port;
@@ -51,18 +58,28 @@ typedef struct tcp_pcb {
     uint32_t          snd_una;
     uint32_t          snd_nxt;
     uint32_t          snd_wnd;
+    uint32_t          snd_window_sequence;
+    uint32_t          snd_window_ack;
+    bool              snd_window_valid;
     uint32_t          rcv_nxt;
 
     /* Receive stream ring buffer */
     uint8_t           rx_buf[TCP_RING_BUF_SIZE];
+    uint8_t           rx_seen[TCP_RING_BUF_SIZE / 8];
     uint32_t          rx_head;
     uint32_t          rx_tail;
     uint32_t          rx_count;
 
-    /* One bounded retransmission slot per stream. */
-    uint8_t           tx_data[TCP_DEFAULT_MSS];
-    uint16_t          tx_len;
-    uint8_t           tx_flags;
+    uint32_t          rx_fin_sequence;
+    bool              rx_fin_pending;
+
+    tcp_tx_segment_t  tx[TCP_TX_SLOTS];
+    unsigned          tx_first;
+    unsigned          tx_count;
+    unsigned          tx_cwnd;
+    unsigned          duplicate_acks;
+    bool              detached;
+    uint64_t          close_at;
     unsigned          retries;
     uint64_t          retry_at;
 
@@ -75,6 +92,7 @@ typedef struct tcp_pcb {
 void tcp_init(void);
 int  tcp_input(pbuf_t *p, uint32_t src_ip, uint32_t dst_ip);
 void tcp_tick(void);
+uint64_t tcp_fast_retransmits(void);
 
 tcp_pcb_t *tcp_new(void);
 int        tcp_bind(tcp_pcb_t *pcb, uint16_t port);

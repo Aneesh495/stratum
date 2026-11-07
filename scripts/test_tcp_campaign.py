@@ -7,6 +7,7 @@ from functools import lru_cache
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 import socket
 import struct
 import tempfile
@@ -45,7 +46,9 @@ def tcp(frame):
 
 
 class Impairment:
-    def __init__(self):
+    def __init__(self, skip_loss=0):
+        self.skip_loss = skip_loss
+        self.server_segments = {}
         self.profiles = {}
         self.applied = {}
         self.pending = {}
@@ -62,6 +65,10 @@ class Impairment:
         if not data or profile is None or peer in self.applied:
             return (packet,)
         if profile == "loss" and sender == 0:
+            seen = self.server_segments.get(peer, 0)
+            self.server_segments[peer] = seen + 1
+            if seen < self.skip_loss:
+                return (packet,)
             self.applied[peer] = (profile, sequence)
             return ()
         if profile == "duplicate" and sender == 1:
@@ -92,6 +99,29 @@ def frames(capture):
             yield frame
 
 
+class WireStream:
+    def __init__(self, size):
+        self.body = bytearray(size)
+        self.present = bytearray(size)
+        self.remaining = size
+        self.finished = False
+
+    def add(self, offset, data):
+        end = offset + len(data)
+        if end > len(self.body):
+            raise RuntimeError("TCP payload exceeded the declared transfer length")
+        previous = self.present[offset:end]
+        absent = previous.count(0)
+        if absent != len(data):
+            observed = self.body[offset:end]
+            if any(prior and old != new for prior, old, new in zip(previous, observed, data)):
+                raise RuntimeError("conflicting wire retransmission")
+        self.body[offset:end] = data
+        self.present[offset:end] = b"\x01" * len(data)
+        self.remaining -= absent
+        return absent != len(data)
+
+
 def verify_wire(capture, sessions, size, impairment=None):
     active = {}
     complete = {}
@@ -108,35 +138,29 @@ def verify_wire(capture, sessions, size, impairment=None):
         direction = 0 if to_guest else 1
         if to_guest and flags & (SYN | ACK) == SYN:
             active.setdefault(port, {"starts": [(sequence + 1) & 0xffffffff, None],
-                                     "data": [bytearray(), bytearray()], "fin": [False, False]})
+                                     "streams": [WireStream(size + 8), WireStream(size)]})
         row = active.get(port)
         if row is None:
             continue
         if not to_guest and flags & (SYN | ACK) == SYN | ACK:
             row["starts"][1] = (sequence + 1) & 0xffffffff
-        if data:
+        stream = row["streams"][direction]
+        if data or flags & FIN:
             start = row["starts"][direction]
             if start is None:
                 raise RuntimeError("observed data without a handshake")
             offset = (sequence - start) & 0xffffffff
-            body = row["data"][direction]
-            if offset > len(body):
-                raise RuntimeError(f"wire stream has a gap for client {port}")
-            shared = min(len(body) - offset, len(data))
-            if body[offset:offset + shared] != data[:shared]:
-                raise RuntimeError("conflicting wire retransmission")
-            if shared and not to_guest:
+            if data and stream.add(offset, data) and not to_guest:
                 retransmitted.add(port)
-            body.extend(data[shared:])
-        if flags & FIN:
-            row["fin"][direction] = True
-        if not all(row["fin"]):
+            if flags & FIN:
+                if offset + len(data) != len(stream.body):
+                    raise RuntimeError(f"FIN at wrong sequence for client {port}")
+                stream.finished = True
+        if not all(item.finished and not item.remaining for item in row["streams"]):
             if flags & RST:
                 raise RuntimeError(f"wire stream reset before both FINs for client {port}")
             continue
-        sent, echoed = row["data"]
-        if len(sent) != size + 8 or len(echoed) != size:
-            raise RuntimeError(f"wrong wire byte counts for client {port}: {len(sent)}, {len(echoed)}")
+        sent, echoed = (item.body for item in row["streams"])
         identity, length = struct.unpack_from("<II", sent)
         if identity in complete or identity >= sessions or length != size:
             raise RuntimeError(f"unexpected transfer identity {identity}")
@@ -162,7 +186,10 @@ def start_server(guest, sessions):
 
 def server_completed(guest, sessions, size):
     summary = f"[PASS] TCP server sessions={sessions} bytes={sessions * size * 2}".encode()
-    require(summary, guest.expect(PROMPT, timeout=35))
+    reply = guest.expect(PROMPT, timeout=35)
+    require(summary, reply)
+    count = re.search(rb"fast_retransmits=(\d+)", reply)
+    return int(count[1]) if count else 0
 
 
 def reference_client(port, identity, size):
@@ -196,9 +223,9 @@ def reference_run(sessions, size, logs):
             "wire_payload_sha256": verify_wire(capture, sessions, size)}
 
 
-def impaired_run(sessions, logs):
+def impaired_run(sessions, logs, size=IMPAIRED_BYTES, *, skip_loss=0):
     capture = logs / "impaired-ethernet.pcap"
-    faults = Impairment()
+    faults = Impairment(skip_loss)
     with tempfile.TemporaryDirectory(dir="build") as directory, link(faults.transform) as (_, (p1, p2)):
         follower = boot_profile(BOOT_IMAGE, Path(directory), "ip=10.0.2.16")
         server_cmd = command(BOOT_IMAGE, cpus=2, ethernet=f"connect=127.0.0.1:{p1}", capture=capture)
@@ -207,13 +234,13 @@ def impaired_run(sessions, logs):
             start_server(server, sessions)
             with running(client_cmd, logs / "impaired-client.log") as guest:
                 guest.expect(PROMPT)
-                guest.send(f"/bin/tcp-campaign send {sessions} {IMPAIRED_BYTES}\r".encode())
-                summary = f"[PASS] TCP client sessions={sessions} bytes={sessions * IMPAIRED_BYTES * 2}"
+                guest.send(f"/bin/tcp-campaign send {sessions} {size}\r".encode())
+                summary = f"[PASS] TCP client sessions={sessions} bytes={sessions * size * 2}"
                 require(summary.encode(), guest.expect(PROMPT, timeout=240))
-            server_completed(server, sessions, IMPAIRED_BYTES)
-    digest = verify_wire(capture, sessions, IMPAIRED_BYTES, faults)
-    return {"sessions": sessions, "bytes": sessions * IMPAIRED_BYTES * 2, "pcap_sha256": file_hash(capture),
-            "wire_payload_sha256": digest, "impairments": faults.applied}
+            fast = server_completed(server, sessions, size)
+    digest = verify_wire(capture, sessions, size, faults)
+    return {"sessions": sessions, "bytes": sessions * size * 2, "pcap_sha256": file_hash(capture),
+            "wire_payload_sha256": digest, "impairments": faults.applied, "fast_retransmits": fast}
 
 
 if __name__ == "__main__":

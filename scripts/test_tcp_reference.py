@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 
@@ -40,7 +41,7 @@ def prepare(iso, scratch):
     def extract(name):
         output = scratch / name
         with output.open("wb") as stream:
-            subprocess.run(["tar", "-xOf", str(iso), f"boot/{name}"], stdout=stream, check=True, timeout=60)
+            subprocess.run([shutil.which("bsdtar") or "tar", "-xOf", str(iso), f"boot/{name}"], stdout=stream, check=True, timeout=60)
         return output
 
     kernel, ramdisk = extract("vmlinuz-virt"), extract("initramfs-virt")

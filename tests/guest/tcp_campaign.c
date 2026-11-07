@@ -128,6 +128,7 @@ static int serve(unsigned count) {
     struct sockaddr_in address = { .sin_family = AF_INET, .sin_port = __builtin_bswap16(TCP_PORT) };
     server.listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     server.sessions = count;
+    uint64_t before = strat_tcp_recovery();
     if (server.listener < 0 ||
         bind(server.listener, (const struct sockaddr *)&address, sizeof(address)) ||
         listen(server.listener, 32)) return 1;
@@ -147,7 +148,8 @@ static int serve(unsigned count) {
     }
     close(server.listener);
     if (failed || server.checked != count) return 1;
-    u_printf("[PASS] TCP server sessions=%u bytes=%lu\n", server.checked, server.bytes);
+    u_printf("[PASS] TCP server sessions=%u bytes=%lu fast_retransmits=%lu\n",
+             server.checked, server.bytes, strat_tcp_recovery() - before);
     return 0;
 }
 
