@@ -181,7 +181,132 @@ static int open_unlinked(bool crash) {
     return 0;
 }
 
+static int cache_campaign(void) {
+    uint64_t before_irqs = strat_blk_irq_wakes();
+    int fd;
+    CHECK((fd = open("/cache", O_CREAT | O_EXCL | O_RDWR, 0600)) >= 0);
+    for (unsigned i = 0; i < 48; i++) {
+        char value = (char)('a' + i % 26);
+        CHECK(lseek(fd, i * 4096, SEEK_SET) == (int64_t)i * 4096);
+        CHECK(write(fd, &value, 1) == 1);
+    }
+    strat_cache_stats_t before, after;
+    CHECK(strat_fs_cache(&before) == 0);
+    for (unsigned pass = 0; pass < 2; pass++) {
+        for (unsigned i = 0; i < 48; i++) {
+            char value;
+            CHECK(lseek(fd, i * 4096, SEEK_SET) == (int64_t)i * 4096);
+            CHECK(read(fd, &value, 1) == 1 && value == 'a' + i % 26);
+        }
+    }
+    CHECK(lseek(fd, 47 * 4096, SEEK_SET) == 47 * 4096);
+    CHECK(write(fd, "!", 1) == 1 && fsync(fd) == 0);
+    char observed;
+    CHECK(lseek(fd, 47 * 4096, SEEK_SET) == 47 * 4096);
+    CHECK(read(fd, &observed, 1) == 1 && observed == '!');
+    CHECK(strat_fs_cache(&after) == 0);
+    CHECK(after.hits > before.hits && after.misses >= before.misses + 48 &&
+          after.evictions >= before.evictions + 32 && after.invalidations > before.invalidations);
+    CHECK(close(fd) == 0 && unlink("/cache") == 0);
+    uint64_t wakes = strat_blk_irq_wakes() - before_irqs;
+    CHECK(wakes > 0);
+    u_printf("[PASS] Block MSI-X woke %lu waiting operations\n", wakes);
+    u_printf("[PASS] StrataFS cache hits=%lu misses=%lu evictions=%lu invalidations=%lu\n",
+             after.hits - before.hits, after.misses - before.misses,
+             after.evictions - before.evictions, after.invalidations - before.invalidations);
+    return 0;
+}
+
+static int allocation_failure(void) {
+    int fd;
+    char payload[512], observed[512];
+    for (unsigned i = 0; i < sizeof(payload); i++) payload[i] = (char)(i * 31);
+    CHECK((fd = open("/rollback", O_CREAT | O_EXCL | O_RDWR, 0600)) >= 0);
+    CHECK(lseek(fd, 4000, SEEK_SET) == 4000);
+    CHECK(write(fd, payload, sizeof(payload)) == -STRATUM_ENOSPC);
+    user_stat_t state;
+    CHECK(stat("/rollback", &state) == 0 && !state.st_size && !state.st_blocks);
+    CHECK(lseek(fd, 0, SEEK_CUR) == 4000);
+    CHECK(write(fd, payload, sizeof(payload)) == sizeof(payload) && fsync(fd) == 0);
+    CHECK(lseek(fd, 4000, SEEK_SET) == 4000 && read(fd, observed, sizeof(observed)) == sizeof(observed));
+    for (unsigned i = 0; i < sizeof(payload); i++) CHECK(observed[i] == payload[i]);
+    CHECK(close(fd) == 0 && unlink("/rollback") == 0);
+    u_printf("[PASS] StrataFS allocation rollback and exact retry bytes\n");
+    return 0;
+}
+
+static int timeout_prepare(void) {
+    int fd;
+    CHECK((fd = open("/slow-block", O_CREAT | O_EXCL | O_RDWR, 0600)) >= 0);
+    for (unsigned i = 0; i < 32; i++) {
+        char value = (char)('A' + i % 26);
+        CHECK(lseek(fd, i * 4096, SEEK_SET) == (int64_t)i * 4096);
+        CHECK(write(fd, &value, 1) == 1);
+    }
+    CHECK(fsync(fd) == 0 && close(fd) == 0);
+    u_printf("[READY] Block timeout fixture persisted\n");
+    return 0;
+}
+
+static int timeout_read(bool expect_error) {
+    int fd = open("/slow-block", O_RDONLY, 0);
+    if (fd != -STRATUM_EIO || !expect_error) {
+        CHECK(fd >= 0);
+        bool failed = false;
+        for (unsigned i = 0; i < 32; i++) {
+            char value;
+            CHECK(lseek(fd, i * 4096, SEEK_SET) == (int64_t)i * 4096);
+            int64_t n = read(fd, &value, 1);
+            if (n == -STRATUM_EIO && expect_error) {
+                failed = true;
+                break;
+            }
+            CHECK(n == 1 && value == 'A' + i % 26);
+        }
+        CHECK(close(fd) == 0 && failed == expect_error);
+    }
+    if (!expect_error) CHECK(unlink("/slow-block") == 0);
+    u_printf(expect_error ? "[PASS] Block timeout returned a bounded read error\n" :
+                            "[PASS] Block reset restored exact fixture bytes\n");
+    return 0;
+}
+
+static int tmpfs_campaign(void) {
+    const char *source = "/tmp/room/scratch";
+    const char *target = "/tmp/note";
+    CHECK(mkdir("/tmp/room", 0700) == 0);
+    int fd;
+    CHECK((fd = open(source, O_CREAT | O_EXCL | O_RDWR, 0600)) >= 0);
+    CHECK(lseek(fd, 4096, SEEK_SET) == 4096);
+    CHECK(write(fd, "volatile", 8) == 8);
+    CHECK(fsync(fd) == 0);
+    char contents[9] = {0};
+    char gap = 1;
+    CHECK(lseek(fd, 4095, SEEK_SET) == 4095 && read(fd, &gap, 1) == 1 && !gap);
+    CHECK(read(fd, contents, 8) == 8 && !strcmp(contents, "volatile"));
+    CHECK(rename(source, target) == 0);
+    CHECK(rename(target, "/cross-volume") == -STRATUM_EXDEV);
+    CHECK(rmdir("/tmp/room") == 0);
+    CHECK(unlink(target) == 0);
+    user_stat_t state;
+    CHECK(stat(target, &state) == -STRATUM_ENOENT);
+    CHECK(lseek(fd, 4096, SEEK_SET) == 4096 && read(fd, contents, 8) == 8 && !strcmp(contents, "volatile"));
+    CHECK(close(fd) == 0);
+    CHECK((fd = open("/tmp/volatile", O_CREAT | O_EXCL | O_WRONLY, 0600)) >= 0);
+    CHECK(write(fd, "temp", 4) == 4 && close(fd) == 0);
+    CHECK((fd = open("/persistent", O_CREAT | O_EXCL | O_WRONLY, 0600)) >= 0);
+    CHECK(write(fd, "disk", 4) == 4 && fsync(fd) == 0 && close(fd) == 0);
+    u_printf("[PASS] tmpfs mount, sparse I/O, namespace and retained handles\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "tmpfs")) return tmpfs_campaign();
+    if (argc == 2 && !strcmp(argv[1], "timeout-prepare")) return timeout_prepare();
+    if (argc == 2 && !strcmp(argv[1], "timeout-read")) return timeout_read(true);
+    if (argc == 2 && !strcmp(argv[1], "timeout-retry")) return timeout_read(false);
+    if (argc == 2 && !strcmp(argv[1], "cache")) return cache_campaign();
+    if (argc == 2 && !strcmp(argv[1], "alloc-fail")) return allocation_failure();
     if (argc == 2 && !strcmp(argv[1], "namespace")) {
         if (setup_namespace()) return 1;
         u_printf("[PASS] StrataFS directory rename and hard links committed\n");

@@ -6,7 +6,7 @@
 #include <kernel/stratafs_dirent.h>
 #include <kernel/journal.h>
 #include <kernel/virtio_blk.h>
-#include <kernel/spinlock.h>
+#include <kernel/mutex.h>
 
 #define STRATAFS_MAGIC              0x5354524154414653ULL /* "STRATAFS" */
 #define STRATAFS_VERSION            1
@@ -15,6 +15,7 @@
 #define STRATAFS_INODE_SIZE         128
 #define STRATAFS_INODES_PER_BLOCK   (STRATAFS_BLOCK_SIZE / STRATAFS_INODE_SIZE)
 #define STRATAFS_ROOT_INO           1
+#define STRATAFS_CACHE_SLOTS        16
 
 #define STRATAFS_NDIR_BLOCKS        12
 #define STRATAFS_INDIR_BLOCKS       (STRATAFS_BLOCK_SIZE / sizeof(uint32_t))
@@ -62,13 +63,24 @@ typedef struct stratafs_disk_inode {
     uint32_t reserved[4];
 } __attribute__((packed)) stratafs_disk_inode_t;
 
+typedef struct stratafs_cache_entry {
+    uint64_t block;
+    uint64_t touched;
+    uint8_t data[STRATAFS_BLOCK_SIZE];
+} stratafs_cache_entry_t;
+
 typedef struct stratafs {
     virtio_blk_dev_t       *dev;
     stratafs_sb_t           sb;
     journal_t               journal;
-    spinlock_t              lock;
+    mutex_t                 lock;
     uint32_t                open_count[2048];
     bool                    orphaned[2048];
+    bool                    cache_active;
+    unsigned                test_alloc_remaining;
+    uint64_t                cache_clock;
+    strat_cache_stats_t     cache_stats;
+    stratafs_cache_entry_t  cache[STRATAFS_CACHE_SLOTS];
     vfs_mount_t            *mount;
 } stratafs_t;
 
@@ -76,6 +88,7 @@ typedef struct stratafs {
 int  stratafs_init(void);
 bool stratafs_is_mounted(void);
 void stratafs_journal_usage(uint32_t *capacity, uint32_t *pending);
+int stratafs_cache_snapshot(strat_cache_stats_t *stats);
 int  stratafs_format(virtio_blk_dev_t *dev);
 int  stratafs_mount_fs(vfs_mount_t *mnt, const char *dev_name);
 

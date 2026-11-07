@@ -1,4 +1,7 @@
 #include <kernel/sched.h>
+#include <kernel/event.h>
+#include <kernel/trace.h>
+#include <shared/errno.h>
 #include <kernel/process.h>
 #include <kernel/smp.h>
 #include <kernel/pmm.h>
@@ -13,6 +16,7 @@ extern void sched_context_switch(uint64_t *prev_rsp_ptr, uint64_t next_rsp, uint
 extern void thread_trampoline(void);
 extern void timer_tick_handler(void);
 extern void timer_add_sleeper(thread_t *thread, uint32_t ms);
+extern void timer_cancel_sleeper(thread_t *thread);
 
 static thread_t   g_thread_pool[SCHED_MAX_THREADS];
 static spinlock_t g_thread_pool_lock = SPINLOCK_INIT;
@@ -381,6 +385,7 @@ void sched_reschedule(void) {
 
     /* Perform context switch */
     uint64_t next_cr3 = next->address_space ? virt_to_phys(next->address_space) : virt_to_phys(g_kernel_pml4);
+    trace_emit(TRACE_EVENT_SCHED_SWITCH, curr->tid, next->tid, 0, 0);
     sched_context_switch(&curr->saved_rsp, next->saved_rsp, next_cr3);
 
     sched_finish_switch();
@@ -427,16 +432,31 @@ void wait_queue_init(wait_queue_t *wq) {
     wq->head = NULL;
 }
 
-void wait_queue_wait_locked(wait_queue_t *wq, spinlock_t *condition, uint64_t flags) {
+static int wait_locked(wait_queue_t *wq, spinlock_t *condition, uint64_t flags, bool interruptible) {
     thread_t *curr = g_runqueues[smp_get_cpu_id()].current_thread;
+    if (interruptible && curr->cancelled) {
+        spin_unlock_irqrestore(condition, flags);
+        return -STRATUM_EINTR;
+    }
     spin_lock(&wq->lock);
     curr->state = THREAD_STATE_BLOCKED;
+    curr->wait_interruptible = interruptible;
+    __atomic_store_n(&curr->waiting_on, wq, __ATOMIC_RELEASE);
     curr->wait_next = wq->head;
     wq->head = curr;
     spin_unlock(&wq->lock);
     spin_unlock(condition);
     sched_reschedule();
     local_irq_restore(flags);
+    return interruptible && curr->cancelled ? -STRATUM_EINTR : 0;
+}
+
+int wait_queue_wait_locked(wait_queue_t *wq, spinlock_t *condition, uint64_t flags) {
+    return wait_locked(wq, condition, flags, true);
+}
+
+void wait_queue_wait_uninterruptible(wait_queue_t *wq, spinlock_t *condition, uint64_t flags) {
+    (void)wait_locked(wq, condition, flags, false);
 }
 
 void wait_queue_wake_one(wait_queue_t *wq) {
@@ -447,6 +467,7 @@ void wait_queue_wake_one(wait_queue_t *wq) {
     if (t) {
         wq->head = t->wait_next;
         t->wait_next = NULL;
+        __atomic_store_n(&t->waiting_on, NULL, __ATOMIC_RELEASE);
         spin_unlock_irqrestore(&wq->lock, flags);
         thread_wake(t);
         return;
@@ -460,6 +481,9 @@ void wait_queue_wake_all(wait_queue_t *wq) {
     spin_lock_irqsave(&wq->lock, &flags);
     thread_t *list = wq->head;
     wq->head = NULL;
+    for (thread_t *thread = list; thread; thread = thread->wait_next) {
+        __atomic_store_n(&thread->waiting_on, NULL, __ATOMIC_RELEASE);
+    }
     spin_unlock_irqrestore(&wq->lock, flags);
 
     while (list) {
@@ -467,6 +491,38 @@ void wait_queue_wake_all(wait_queue_t *wq) {
         list->wait_next = NULL;
         thread_wake(list);
         list = next;
+    }
+}
+
+bool thread_cancelled(void) {
+    thread_t *thread = g_runqueues[smp_get_cpu_id()].current_thread;
+    return thread && thread->cancelled;
+}
+
+void thread_cancel(thread_t *thread) {
+    if (!thread || thread->cancelled) return;
+
+    /* All threads in the calling process share one CPU. The target cannot
+       leave its wait or drop its reference to the queue while this runs. */
+    thread->cancelled = true;
+    wait_queue_t *queue = __atomic_load_n(&thread->waiting_on, __ATOMIC_ACQUIRE);
+    if (queue) {
+        if (!thread->wait_interruptible) return;
+        uint64_t flags;
+        spin_lock_irqsave(&queue->lock, &flags);
+        for (thread_t **link = &queue->head; *link; link = &(*link)->wait_next) {
+            if (*link == thread) {
+                *link = thread->wait_next;
+                thread->wait_next = NULL;
+                __atomic_store_n(&thread->waiting_on, NULL, __ATOMIC_RELEASE);
+                thread_wake(thread);
+                break;
+            }
+        }
+        spin_unlock_irqrestore(&queue->lock, flags);
+    } else {
+        event_cancel(thread);
+        timer_cancel_sleeper(thread);
     }
 }
 
@@ -484,7 +540,6 @@ void thread_exit(void) {
 }
 
 void sched_tick(interrupt_frame_t *frame) {
-    (void)frame;
     uint32_t cpu_id = smp_get_cpu_id();
 
     /* Monotonic timekeeping driven by BSP */
@@ -495,6 +550,7 @@ void sched_tick(interrupt_frame_t *frame) {
     runqueue_t *rq = &g_runqueues[cpu_id];
     thread_t *curr = rq->current_thread;
 
+    if (curr && curr->cancelled && (frame->cs & 3) == 3) process_exit_thread(-STRATUM_EINTR);
     bool need_resched = false;
     spin_lock(&rq->lock);
     if (curr == rq->idle_thread && rq->nr_running > 0) {

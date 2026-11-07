@@ -1,4 +1,5 @@
 #include <kernel/vmm.h>
+#include <kernel/trace.h>
 #include <kernel/pmm.h>
 #include <kernel/process.h>
 #include <kernel/kernel.h>
@@ -247,6 +248,8 @@ void vmm_page_fault_handler(interrupt_frame_t *frame) {
     bool is_execute = (error_code & 16) != 0;
     extern uint8_t __usercopy_start[], __usercopy_end[], __usercopy_fault[];
     bool is_usercopy = frame->rip >= (uint64_t)__usercopy_start && frame->rip < (uint64_t)__usercopy_end;
+
+    if (is_user) trace_emit(TRACE_EVENT_PAGE_FAULT, fault_addr, error_code, 0, 0);
 
     /* Check for kernel upper-half PML4 synchronization */
     if (fault_addr >= 0xFFFF800000000000ULL) {

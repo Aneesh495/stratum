@@ -55,8 +55,10 @@
 
 /* Standard Vectors */
 #define VEC_APIC_TIMER          0x20
+#define VEC_KEYBOARD            0x21
 #define VEC_UART_RX             0x24
 #define VEC_VIRTIO_NET_RX       0x34
+#define VEC_VIRTIO_BLK          0x35
 #define VEC_IPI_RESCHED         0x30
 #define VEC_IPI_TLB             0xFD
 #define VEC_IPI_HALT            0xFE

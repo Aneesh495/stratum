@@ -61,7 +61,8 @@ int64_t channel_read_user(file_t *file, void *buffer, size_t count) {
             spin_unlock_irqrestore(&pair->lock, flags);
             return -STRATUM_EAGAIN;
         }
-        wait_queue_wait_locked(&queue->readable, &pair->lock, flags);
+        int interrupted = wait_queue_wait_locked(&queue->readable, &pair->lock, flags);
+        if (interrupted) return interrupted;
     }
 }
 
@@ -93,7 +94,8 @@ static int64_t channel_write(file_t *file, const void *buffer, size_t count) {
             spin_unlock_irqrestore(&pair->lock, flags);
             return -STRATUM_EAGAIN;
         }
-        wait_queue_wait_locked(&queue->writable, &pair->lock, flags);
+        int interrupted = wait_queue_wait_locked(&queue->writable, &pair->lock, flags);
+        if (interrupted) return interrupted;
     }
 }
 

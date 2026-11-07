@@ -1,66 +1,87 @@
 #include <kernel/trace.h>
 #include <kernel/smp.h>
 #include <kernel/kernel.h>
-#include <kernel/string.h>
+#include <kernel/x86_64.h>
+#include <shared/errno.h>
 
-static trace_per_cpu_t g_trace_cpus[TRACE_MAX_CPUS];
-static bool g_trace_inited = false;
+typedef struct {
+    uint64_t sequence;
+    strat_trace_record_t record;
+} trace_slot_t;
 
-static inline uint64_t rdtsc_pure(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-}
+static struct {
+    uint64_t head;
+    trace_slot_t slots[TRACE_RING_BUFFER_ENTRIES];
+} traces[TRACE_MAX_CPUS];
+static bool ready;
 
 void trace_init(void) {
-    memset(g_trace_cpus, 0, sizeof(g_trace_cpus));
-    g_trace_inited = true;
-    kprintf("[TRACE] Per-CPU lockless tracing ring buffers initialized (capacity: %d entries/CPU).\n",
+    ready = true;
+    kprintf("[TRACE] Per-CPU trace rings initialized (capacity: %d entries/CPU).\n",
             TRACE_RING_BUFFER_ENTRIES);
 }
 
-void trace_emit(uint32_t event_id, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    if (!g_trace_inited) return;
-
-    uint32_t cpu_id = smp_get_cpu_id();
-    if (cpu_id >= TRACE_MAX_CPUS) cpu_id = 0;
-
-    trace_per_cpu_t *tb = &g_trace_cpus[cpu_id];
-    uint64_t current_head = tb->head;
-    uint64_t next_head = current_head + 1;
-
-    /* Check if full without blocking: if next would overtake tail by capacity */
-    if ((next_head - tb->tail) >= TRACE_RING_BUFFER_ENTRIES) {
-        __atomic_add_fetch(&tb->lost_events, 1, __ATOMIC_RELAXED);
-        /* Advance tail to drop oldest entry */
-        __atomic_add_fetch(&tb->tail, 1, __ATOMIC_RELAXED);
+void trace_emit(uint32_t event, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
+    if (!ready) return;
+    uint64_t flags = local_irq_save();
+    uint32_t cpu = smp_get_cpu_id();
+    if (cpu < TRACE_MAX_CPUS) {
+        uint64_t head = __atomic_load_n(&traces[cpu].head, __ATOMIC_RELAXED);
+        trace_slot_t *slot = &traces[cpu].slots[head % TRACE_RING_BUFFER_ENTRIES];
+        /* Invalidate the old record before updating a slot visible to other CPUs. */
+        __atomic_store_n(&slot->sequence, 0, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&slot->record.tsc, rdtsc(), __ATOMIC_RELAXED);
+        __atomic_store_n(&slot->record.cpu, cpu, __ATOMIC_RELAXED);
+        __atomic_store_n(&slot->record.event, event, __ATOMIC_RELAXED);
+        __atomic_store_n(&slot->record.args[0], a1, __ATOMIC_RELAXED);
+        __atomic_store_n(&slot->record.args[1], a2, __ATOMIC_RELAXED);
+        __atomic_store_n(&slot->record.args[2], a3, __ATOMIC_RELAXED);
+        __atomic_store_n(&slot->record.args[3], a4, __ATOMIC_RELAXED);
+        __atomic_store_n(&slot->sequence, head + 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&traces[cpu].head, head + 1, __ATOMIC_RELEASE);
     }
-
-    uint64_t idx = current_head % TRACE_RING_BUFFER_ENTRIES;
-    trace_entry_t *entry = &tb->entries[idx];
-    entry->timestamp_tsc = rdtsc_pure();
-    entry->cpu_id = cpu_id;
-    entry->event_id = event_id;
-    entry->arg1 = a1;
-    entry->arg2 = a2;
-    entry->arg3 = a3;
-    entry->arg4 = a4;
-
-    __atomic_store_n(&tb->head, next_head, __ATOMIC_RELEASE);
+    local_irq_restore(flags);
 }
 
-uint64_t trace_get_losses(uint32_t cpu_id) {
-    if (cpu_id >= TRACE_MAX_CPUS) return 0;
-    return g_trace_cpus[cpu_id].lost_events;
+int trace_info(uint32_t cpu, strat_trace_info_t *info) {
+    if (cpu >= TRACE_MAX_CPUS || cpu >= smp_get_online_cpus()) return -STRATUM_EINVAL;
+    uint64_t next = __atomic_load_n(&traces[cpu].head, __ATOMIC_ACQUIRE);
+    uint64_t first = next > TRACE_RING_BUFFER_ENTRIES ? next - TRACE_RING_BUFFER_ENTRIES : 0;
+    *info = (strat_trace_info_t){ .first = first, .next = next, .lost = first };
+    return 0;
+}
+
+int trace_read(uint32_t cpu, uint64_t sequence, strat_trace_record_t *out) {
+    strat_trace_info_t info;
+    int result = trace_info(cpu, &info);
+    if (result) return result;
+    if (sequence < info.first) return -STRATUM_ERANGE;
+    if (sequence >= info.next) return -STRATUM_EAGAIN;
+    trace_slot_t *slot = &traces[cpu].slots[sequence % TRACE_RING_BUFFER_ENTRIES];
+    if (__atomic_load_n(&slot->sequence, __ATOMIC_ACQUIRE) != sequence + 1) return -STRATUM_EAGAIN;
+    strat_trace_record_t record = {
+        .tsc = __atomic_load_n(&slot->record.tsc, __ATOMIC_RELAXED),
+        .cpu = __atomic_load_n(&slot->record.cpu, __ATOMIC_RELAXED),
+        .event = __atomic_load_n(&slot->record.event, __ATOMIC_RELAXED),
+    };
+    for (unsigned i = 0; i < 4; i++) record.args[i] = __atomic_load_n(&slot->record.args[i], __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    if (__atomic_load_n(&slot->sequence, __ATOMIC_ACQUIRE) != sequence + 1) return -STRATUM_EAGAIN;
+    *out = record;
+    return 0;
+}
+
+uint64_t trace_get_losses(uint32_t cpu) {
+    strat_trace_info_t info;
+    return trace_info(cpu, &info) ? 0 : info.lost;
 }
 
 void trace_dump(void) {
     kprintf("[TRACE] Dump of active CPU trace ring buffers:\n");
-    for (uint32_t c = 0; c < TRACE_MAX_CPUS; c++) {
-        trace_per_cpu_t *tb = &g_trace_cpus[c];
-        if (tb->head > 0 || tb->lost_events > 0) {
-            kprintf("  CPU %u: Head=%lu Tail=%lu Lost=%lu\n",
-                    c, tb->head, tb->tail, tb->lost_events);
+    for (uint32_t cpu = 0; cpu < TRACE_MAX_CPUS; cpu++) {
+        strat_trace_info_t info;
+        if (!trace_info(cpu, &info) && info.next) {
+            kprintf("  CPU %u: Head=%lu Tail=%lu Lost=%lu\n", cpu, info.next, info.first, info.lost);
         }
     }
 }

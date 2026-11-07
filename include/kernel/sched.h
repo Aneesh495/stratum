@@ -36,6 +36,7 @@ typedef struct thread {
     uint32_t         assigned_cpu;
     volatile bool    on_cpu;
     bool             pinned;
+    bool             cancelled;
 
     uint64_t         timeslice_remaining;
     uint64_t         runtime_ticks;
@@ -54,6 +55,8 @@ typedef struct thread {
 
     struct thread   *next;          /* Queue link */
     struct thread   *global_next;   /* Global thread table link */
+    bool             wait_interruptible;
+    struct wait_queue *waiting_on;
     struct thread   *wait_next;     /* Wait queue link */
 } thread_t;
 
@@ -86,13 +89,16 @@ thread_t *thread_create_worker(struct process *process, uint32_t slot, uint64_t 
                                void (*entry)(void *), void *arg);
 void      thread_reset_user_state(thread_t *thread);
 void      thread_exit(void);
+bool      thread_cancelled(void);
+void      thread_cancel(thread_t *thread);
 uint64_t  sched_live_threads(void);
 void      thread_yield(void);
 void      thread_sleep_ms(uint32_t ms);
 void      thread_wake(thread_t *thread);
 
 void      wait_queue_init(wait_queue_t *wq);
-void      wait_queue_wait_locked(wait_queue_t *wq, spinlock_t *condition, uint64_t flags);
+int       wait_queue_wait_locked(wait_queue_t *wq, spinlock_t *condition, uint64_t flags);
+void      wait_queue_wait_uninterruptible(wait_queue_t *wq, spinlock_t *condition, uint64_t flags);
 void      wait_queue_wake_one(wait_queue_t *wq);
 void      wait_queue_wake_all(wait_queue_t *wq);
 

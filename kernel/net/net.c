@@ -1,6 +1,7 @@
 #include <kernel/net.h>
 #include <kernel/sched.h>
 #include <kernel/event.h>
+#include <kernel/trace.h>
 #include <kernel/boot.h>
 #include <kernel/ethernet.h>
 #include <kernel/arp.h>
@@ -105,6 +106,7 @@ void net_poll(void) {
         p->len = (uint16_t)bytes;
         p->tot_len = (uint16_t)bytes;
 
+        trace_emit(TRACE_EVENT_NET_PACKET, p->len, 0, 0, 0);
         ethernet_input(p);
         processed = true;
     }

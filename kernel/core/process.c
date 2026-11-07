@@ -121,6 +121,7 @@ process_t *process_create_init(user_program_t *prog) {
 static void fork_child_entry(void *arg) {
     syscall_regs_t regs = *(syscall_regs_t *)arg;
     kfree(arg);
+    if (thread_cancelled()) process_exit_thread(-STRATUM_EINTR);
     user_enter_regs(&regs);
 }
 
@@ -245,6 +246,7 @@ int64_t process_thread_create(uint64_t trampoline, uint64_t entry, uint64_t arg,
     /* The worker is pinned to this CPU and cannot run before syscall return. */
     thread_t *thread = thread_create_worker(proc, slot + 1, fs_base, fork_child_entry, regs);
     if (!thread) goto failed;
+    proc->workers[slot].thread = thread;
     proc->workers[slot].tid = thread->tid;
     proc->live_threads++;
     return thread->tid;
@@ -276,7 +278,8 @@ int process_thread_join(uint64_t tid, int *status) {
             return -STRATUM_ESRCH;
         }
         if (!target->finished) {
-            wait_queue_wait_locked(&proc->wait_threads, &proc->lock, flags);
+            int result = wait_queue_wait_locked(&proc->wait_threads, &proc->lock, flags);
+            if (result) return result;
             continue;
         }
         if (status && copy_to_user(status, &target->status, sizeof(*status))) {
@@ -305,7 +308,36 @@ int process_arch_prctl(uint64_t op, uint64_t value) {
     return -STRATUM_EINVAL;
 }
 
+int process_thread_cancel(uint64_t tid) {
+    process_t *proc = process_get_current();
+    if (!proc) return -STRATUM_ESRCH;
+    if (tid == process_thread_self()) return -STRATUM_EINVAL;
+    for (unsigned i = 0; i < PROCESS_WORKERS; i++) {
+        const user_thread_slot_t *slot = &proc->workers[i];
+        if (slot->thread && slot->tid == tid) {
+            thread_cancel(slot->thread);
+            return 0;
+        }
+    }
+    return -STRATUM_ESRCH;
+}
+
 void process_exit(int status) {
+    thread_t *thread = current_thread();
+    process_t *proc = thread->process;
+    if (proc && !proc->exiting) {
+        proc->exiting = true;
+        proc->exit_code = status;
+        if (proc->main_thread && proc->main_thread != thread) thread_cancel(proc->main_thread);
+        for (unsigned i = 0; i < PROCESS_WORKERS; i++) {
+            thread_t *worker = proc->workers[i].thread;
+            if (worker && worker != thread) thread_cancel(worker);
+        }
+    }
+    process_exit_thread(status);
+}
+
+void process_exit_thread(int status) {
     thread_t *thread = current_thread();
     thread->exit_status = status;
     if (thread->process && thread->process->live_threads == 1) fd_table_destroy(&thread->process->fds);
@@ -343,12 +375,13 @@ void process_finish_thread(process_t *proc, unsigned slot, int status) {
        are pinned to this CPU, so no remote TLB can retain the worker mapping. */
     if (slot) {
         release_worker_stack(proc, slot);
+        proc->workers[slot - 1].thread = NULL;
         proc->workers[slot - 1].status = status;
         proc->workers[slot - 1].finished = true;
         wait_queue_wake_all(&proc->wait_threads);
     } else {
         proc->main_thread = NULL;
-        proc->exit_code = status;
+        if (!proc->exiting) proc->exit_code = status;
     }
 
     if (--proc->live_threads == 0) process_finish_exit(proc);
@@ -406,6 +439,7 @@ int32_t process_waitpid(int32_t pid, int *status, int options) {
             return 0;
         }
 
-        wait_queue_wait_locked(&parent->wait_child, &g_process_lock, flags);
+        int result = wait_queue_wait_locked(&parent->wait_child, &g_process_lock, flags);
+        if (result) return result;
     }
 }

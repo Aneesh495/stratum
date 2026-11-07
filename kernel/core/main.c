@@ -21,6 +21,8 @@
 #include <kernel/virtio_blk.h>
 #include <kernel/virtio_net.h>
 #include <kernel/vfs.h>
+#include <kernel/tmpfs.h>
+#include <kernel/keyboard.h>
 #include <kernel/stratafs.h>
 #include <kernel/journal.h>
 #include <kernel/net.h>
@@ -80,6 +82,10 @@ static _Noreturn void start_system(void) {
     process_init();
     trace_init();
     uart_enable_rx_irq();
+    if (!strcmp(g_boot_handoff.cmdline, "console=both\n")) {
+        file_console_mirror();
+        keyboard_init();
+    }
     sti();
 
     if (!strcmp(g_boot_handoff.cmdline, "boot-probe\n")) boot_probe_run();
@@ -107,6 +113,9 @@ static _Noreturn void start_system(void) {
     if (mount_result != 0) {
         kprintf("[KERNEL] Root mount failed (%d). Starting shell without storage.\n", mount_result);
     }
+    int tmp_result = tmpfs_init();
+    if (!tmp_result) tmp_result = vfs_mount(NULL, "/tmp", "tmpfs", 0);
+    if (tmp_result) kprintf("[KERNEL] /tmp mount failed (%d).\n", tmp_result);
     net_init();
     net_start_worker();
     journal_test_configure(g_boot_handoff.cmdline);

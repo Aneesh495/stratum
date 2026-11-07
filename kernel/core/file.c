@@ -4,12 +4,18 @@
 #include <kernel/kernel.h>
 #include <kernel/string.h>
 #include <kernel/uart.h>
+#include <kernel/keyboard.h>
 #include <kernel/sched.h>
 #include <shared/errno.h>
 #include <shared/syscall_nums.h>
 
 static kmem_cache_t *g_file_cache = NULL;
 static uint64_t live_objects;
+static bool mirror_console;
+
+void file_console_mirror(void) {
+    mirror_console = true;
+}
 
 uint64_t file_live_objects(void) {
     return __atomic_load_n(&live_objects, __ATOMIC_ACQUIRE);
@@ -23,9 +29,14 @@ static int64_t console_read(file_t *file, void *buf, size_t count) {
     for (;;) {
         uint64_t generation = readiness_generation();
         ch = uart_getc_nonblocking();
+        if (ch < 0) ch = keyboard_getc();
         if (ch >= 0) break;
-        if (uart_rx_uses_irq()) readiness_wait(generation, (uint64_t)-1);
-        else thread_sleep_ms(10);
+        if (uart_rx_uses_irq()) {
+            if (readiness_wait(generation, (uint64_t)-1) == -STRATUM_EINTR) return -STRATUM_EINTR;
+        } else {
+            thread_sleep_ms(10);
+            if (thread_cancelled()) return -STRATUM_EINTR;
+        }
     }
     ((char *)buf)[0] = (char)ch;
     return 1;
@@ -34,14 +45,14 @@ static int64_t console_read(file_t *file, void *buf, size_t count) {
 static int64_t console_write(file_t *file, const void *buf, size_t count) {
     (void)file;
     if (!buf || count == 0) return 0;
-    uart_write((const char *)buf, count);
+    kconsole_write(buf, count, mirror_console);
     return (int64_t)count;
 }
 
 static int console_poll(file_t *file, uint32_t events) {
     (void)file;
     int revents = 0;
-    if ((events & POLLIN) && uart_input_ready()) revents |= POLLIN;
+    if ((events & POLLIN) && (uart_input_ready() || keyboard_ready())) revents |= POLLIN;
     if (events & POLLOUT) {
         revents |= POLLOUT;
     }
@@ -78,7 +89,7 @@ file_t *file_alloc(file_type_t type, const file_ops_t *ops, void *priv) {
     f->ops = ops;
     f->priv = priv;
     f->refcount = 1;
-    spin_lock_init(&f->lock);
+    mutex_init(&f->lock);
     __atomic_add_fetch(&live_objects, 1, __ATOMIC_RELEASE);
     return f;
 }

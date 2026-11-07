@@ -3,6 +3,7 @@
 
 #include <kernel/types.h>
 #include <kernel/virtio.h>
+#include <kernel/mutex.h>
 
 #define VIRTIO_BLK_PCI_LEGACY_DEVICE_ID 0x1001
 #define VIRTIO_BLK_PCI_MODERN_DEVICE_ID 0x1042
@@ -46,13 +47,16 @@ typedef struct virtio_blk_dev {
     uint32_t           block_size;
     bool               read_only;
     bool               failed;
-    spinlock_t         lock;
+    mutex_t            lock;
+    uint8_t            irq_apic;
+    bool               irq_enabled;
 } virtio_blk_dev_t;
 
 int               virtio_blk_init(void);
 virtio_blk_dev_t *virtio_blk_get_primary(void);
 int64_t           virtio_blk_read(virtio_blk_dev_t *dev, uint64_t sector, uint32_t count, void *buf);
 int64_t           virtio_blk_write(virtio_blk_dev_t *dev, uint64_t sector, uint32_t count, const void *buf);
+uint64_t          virtio_blk_irq_wakes(void);
 int               virtio_blk_reset(virtio_blk_dev_t *dev);
 int               virtio_blk_flush(virtio_blk_dev_t *dev);
 

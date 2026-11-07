@@ -28,6 +28,9 @@ static void cmd_help(void) {
     u_printf("  ledgerpull <ip> <id>    Fetch and store a peer record\n");
     u_printf("  ledgerd [peer-ip]   Serve durable records and optionally replicate appends\n");
     u_printf("  sysinfo             Display kernel memory, CPUs, and uptime\n");
+    u_printf("  trace               Show recent events on this CPU\n");
+    u_printf("  cp <from> <to>      Copy a file to a new path\n");
+    u_printf("  sha256sum <file>    Print a SHA-256 digest\n");
 }
 
 static void cmd_echo(int argc, char **argv) {
@@ -138,6 +141,31 @@ static void cmd_sysinfo(void) {
     }
 }
 
+static int cmd_trace(const char *text) {
+    unsigned cpu = (unsigned)strat_getcpu();
+    if (text) {
+        cpu = 0;
+        if (!*text) return -STRATUM_EINVAL;
+        for (; *text; text++) {
+            if (*text < '0' || *text > '9') return -STRATUM_EINVAL;
+            cpu = cpu * 10 + (unsigned)(*text - '0');
+            if (cpu >= 32) return -STRATUM_EINVAL;
+        }
+    }
+    strat_trace_info_t info;
+    int result = strat_trace_info(cpu, &info);
+    if (result) return result;
+    u_printf("Trace CPU %u first=%lu next=%lu lost=%lu\n", cpu, info.first, info.next, info.lost);
+    uint64_t start = info.next - info.first > 16 ? info.next - 16 : info.first;
+    for (uint64_t at = start; at < info.next; at++) {
+        strat_trace_record_t record;
+        if (strat_trace_read(cpu, at, &record)) continue;
+        u_printf("%lu tsc=%lu event=%u args=%lx,%lx,%lx,%lx\n", at, record.tsc, record.event,
+                 record.args[0], record.args[1], record.args[2], record.args[3]);
+    }
+    return 0;
+}
+
 static int cmd_write(int argc, char **argv) {
     if (argc < 3) {
         u_printf("Usage: write <file> <text>\n");
@@ -202,6 +230,8 @@ static int sh_builtin(int argc, char **argv) {
         int result = argc == 2 ? rmdir(argv[1]) : -STRATUM_EINVAL;
         if (result) u_printf("rmdir: failed (err=%d)\n", result);
         return result;
+    } else if (strcmp(argv[0], "trace") == 0) {
+        return argc <= 2 ? cmd_trace(argc == 2 ? argv[1] : NULL) : -STRATUM_EINVAL;
     } else if (strcmp(argv[0], "sysinfo") == 0) {
         cmd_sysinfo();
     } else if ((strcmp(argv[0], "ledgerput") == 0 || strcmp(argv[0], "ledgerpull") == 0) && argc == 3) {

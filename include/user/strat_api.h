@@ -130,6 +130,10 @@ static inline int strat_thread_join(uint32_t tid, int *status) {
     return (int)syscall2(SYS_thread_join, tid, (uintptr_t)status);
 }
 
+static inline int strat_thread_cancel(uint32_t tid) {
+    return (int)syscall1(SYS_thread_cancel, tid);
+}
+
 static inline uint32_t strat_thread_self(void) {
     return (uint32_t)syscall0(SYS_thread_self);
 }
@@ -315,8 +319,24 @@ static inline int sysinfo(strat_sysinfo_t *info) {
     return (int)syscall1(SYS_sysinfo, (uint64_t)info);
 }
 
+static inline uint64_t strat_blk_irq_wakes(void) {
+    return (uint64_t)syscall0(SYS_blk_irq_wakes);
+}
+
+static inline int strat_fs_cache(strat_cache_stats_t *stats) {
+    return (int)syscall1(SYS_fs_cache, (uintptr_t)stats);
+}
+
 static inline int strat_resources(strat_resources_t *resources) {
     return (int)syscall1(SYS_resources, (uintptr_t)resources);
+}
+
+static inline int strat_trace_info(unsigned cpu, strat_trace_info_t *info) {
+    return (int)syscall2(SYS_trace_info, cpu, (uintptr_t)info);
+}
+
+static inline int strat_trace_read(unsigned cpu, uint64_t index, strat_trace_record_t *record) {
+    return (int)syscall3(SYS_trace_read, cpu, index, (uintptr_t)record);
 }
 
 static inline void trace_emit(uint32_t event_id, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
