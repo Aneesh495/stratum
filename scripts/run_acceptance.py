@@ -54,7 +54,7 @@ def main():
 
         try:
             return full_acceptance.run()
-        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
             print(f"Acceptance runner failed: {error}", file=sys.stderr)
             return 2
 

@@ -7,6 +7,9 @@ Ensures no em dashes are present in public documentation per project guidelines.
 import os
 import re
 import sys
+from pathlib import Path
+
+from acceptance_features import parse_register
 
 DOCS_DIR = "docs"
 REQUIRED_DOCS = [
@@ -71,6 +74,11 @@ def main():
                 if fpath not in REQUIRED_DOCS:
                     errs = check_file(fpath)
                     all_errors.extend(errs)
+
+    try:
+        parse_register(Path("docs/ACCEPTANCE_PLAN.md").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        all_errors.append(str(error))
 
     if all_errors:
         print(f"\n[FAIL] Found {len(all_errors)} documentation issues:")

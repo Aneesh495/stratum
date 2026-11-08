@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 
-from acceptance_features import feature_rows
+from acceptance_features import feature_rows, parse_register
 from acceptance_schema import GAPS, GATES, RUNS, SCHEMA
 from evidence_format import copy_artifact, file_hash
 from vm import firmware, tool
@@ -91,10 +91,37 @@ def preserve(checkout, dest, patterns):
     return kept
 
 
+def finalize(dest, register, results, commit):
+    if results.keys() != RUNS.keys():
+        raise ValueError("cannot finalize without observations for every workload")
+    if (dest / "MANIFEST.json").exists():
+        raise ValueError("acceptance bundle already finalized")
+    gates = {}
+    for gate, requirements in GATES.items():
+        failed = [name for name in requirements if results[name]["exit"] not in (None, 0)]
+        blocked = [name for name in requirements if results[name]["exit"] is None]
+        gap = GAPS.get(gate)
+        status = "failed" if failed else ("blocked" if blocked else ("unverified" if gap else "passed"))
+        gates[gate] = {"status": status, "failed_workloads": failed, "blocked_workloads": blocked,
+                       "required_workloads": requirements, "unverified_requirement": gap}
+    features = feature_rows(register, results, commit)
+    statuses = [row["status"] for row in (*gates.values(), *features.values())]
+    counts = {key: statuses.count(key) for key in ("passed", "failed", "blocked", "unverified", "skipped")}
+    result = "passed" if counts["passed"] == len(statuses) else "incomplete"
+    write(dest / "features.json", features)
+    write(dest / "workloads.json", results)
+    write(dest / "ACCEPTANCE.json", {"schema": SCHEMA, "source": commit, "result": result, "counts": counts, "gates": gates})
+    write(dest / "MANIFEST.json", {"schema": SCHEMA, "source": commit, "files": {
+        str(path.relative_to(dest)): file_hash(path) for path in sorted(dest.rglob("*")) if path.is_file()
+    }})
+    return result
+
+
 def run():
     root = Path.cwd()
     if git(root, "status", "--porcelain"):
         raise RuntimeError("commit the source before generating full evidence")
+    register = parse_register((root / "docs/ACCEPTANCE_PLAN.md").read_text(encoding="utf-8"))
     commit = git(root, "rev-parse", "HEAD").decode()
     tree = git(root, "rev-parse", "HEAD^{tree}").decode()
     output = root / "build" / "acceptance"
@@ -150,25 +177,7 @@ def run():
             else:
                 blocked("soak")
 
-    gates = {}
-    for gate, requirements in GATES.items():
-        failed = [name for name in requirements if results[name]["exit"] not in (None, 0)]
-        blocked = [name for name in requirements if results[name]["exit"] is None]
-        gap = GAPS.get(gate)
-        status = "failed" if failed else ("blocked" if blocked else ("unverified" if gap else "passed"))
-        gates[gate] = {"status": status, "failed_workloads": failed, "blocked_workloads": blocked,
-                       "required_workloads": requirements, "unverified_requirement": gap}
-    plan = (root / "docs/ACCEPTANCE_PLAN.md").read_text(encoding="utf-8")
-    features = feature_rows(plan, results, commit)
-    statuses = [row["status"] for row in (*gates.values(), *features.values())]
-    counts = {key: statuses.count(key) for key in ("passed", "failed", "blocked", "unverified", "skipped")}
-    result = "passed" if counts["passed"] == len(statuses) else "incomplete"
-    write(dest / "features.json", features)
-    write(dest / "workloads.json", results)
-    write(dest / "ACCEPTANCE.json", {"schema": SCHEMA, "source": commit, "result": result, "counts": counts, "gates": gates})
-    write(dest / "MANIFEST.json", {"schema": SCHEMA, "source": commit, "files": {
-        str(path.relative_to(dest)): file_hash(path) for path in sorted(dest.rglob("*")) if path.is_file()
-    }})
+    result = finalize(dest, register, results, commit)
     verification = subprocess.run([sys.executable, "scripts/verify_evidence.py", "--inspect", str(dest)],
                                   timeout=300)
     if verification.returncode:
