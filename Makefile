@@ -115,7 +115,7 @@ test-net-reject: image
 test-service: image
 	@$(PYTHON) scripts/test_ledger_load.py
 
-EXTRA_GUEST_TESTS = cancel block-timeout storage-cache tmpfs trace framebuffer tcp-reference tcp-recovery icmp supervision entry-stacks resource-limits
+EXTRA_GUEST_TESTS = cancel block-timeout storage-cache tmpfs trace framebuffer tcp-reference tcp-recovery icmp supervision entry-stacks resource-limits deadlines
 .PHONY: $(addprefix test-,$(EXTRA_GUEST_TESTS))
 $(addprefix test-,$(EXTRA_GUEST_TESTS)): image
 	@$(PYTHON) scripts/test_$(subst -,_,$(patsubst test-%,%,$@)).py
@@ -129,7 +129,10 @@ fuzz:
 soak: image
 	@$(PYTHON) scripts/test_soak.py
 
-.PHONY: bench-guest
+.PHONY: bench-guest bench-compare
+bench-compare:
+	@$(PYTHON) scripts/compare_benchmarks.py "$(BASELINE)"
+
 bench-guest: image
 	@$(PYTHON) scripts/test_guest_bench.py
 
@@ -154,7 +157,8 @@ verify:
 test-acceptance-controls:
 	@$(PYTHON) scripts/test_acceptance_controls.py "$(EVIDENCE)"
 
-release: acceptance
+release:
+	@$(PYTHON) scripts/package_release.py "$(EVIDENCE)"
 
 clean:
 	@rm -rf "$(BUILD_DIR)"

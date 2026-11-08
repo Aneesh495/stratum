@@ -1,0 +1,22 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Split virtqueue buffer ownership"];
+    free [label="Free descriptors and caller-owned buffer"];
+    prepare [label="Write DMA descriptors and avail entry"];
+    device [label="Device owns submitted chain"];
+    irq [label="MSI-X signals completion"];
+    used [label="Validate used ID, length and device status"];
+    release [label="Return descriptors and DMA ownership"];
+    timeout [label="Deadline expires"];
+    reset [label="Reset and wait for device acknowledgment"];
+
+    free -> prepare [label="Reserve chain"];
+    prepare -> device [label="Publish index and notify"];
+    device -> irq [label="Publish used entry"];
+    irq -> used [label="Wake waiter"];
+    used -> release [label="Retire chain"];
+    release -> free [label="Reclaim"];
+    device -> timeout [label="No progress"];
+    timeout -> reset [label="Old DMA remains live"];
+    reset -> release [label="Only after reset ACK"];
+}

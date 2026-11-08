@@ -556,7 +556,9 @@ void sched_tick(interrupt_frame_t *frame) {
     if (curr && curr->cancelled && (frame->cs & 3) == 3) process_exit_thread(-STRATUM_EINTR);
     bool need_resched = false;
     spin_lock(&rq->lock);
-    if (curr == rq->idle_thread && rq->nr_running > 0) {
+    if (curr == rq->idle_thread) {
+        /* Idle CPUs must revisit the work-stealing path even when their own
+           queues have not received a new task. */
         need_resched = true;
     } else if (curr && curr != rq->idle_thread) {
         curr->runtime_ticks++;

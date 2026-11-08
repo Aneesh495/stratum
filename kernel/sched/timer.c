@@ -17,16 +17,18 @@ uint64_t timer_get_uptime_ms(void) {
 void timer_add_sleeper(thread_t *thread, uint32_t ms) {
     if (!thread) return;
 
-    uint64_t delta_ticks = ((uint64_t)ms + 9) / 10;
-    if (delta_ticks == 0) delta_ticks = 1;
+    /* Allow for entry immediately before a timer tick. */
+    uint64_t delta_ticks = ((uint64_t)ms + 9) / 10 + 1;
 
     uint64_t flags;
     spin_lock_irqsave(&g_sleep_lock, &flags);
 
     thread->sleep_until_ticks = timer_get_ticks() + delta_ticks;
     thread->state = THREAD_STATE_SLEEPING;
-    thread->next = g_sleep_queue;
-    g_sleep_queue = thread;
+    thread_t **slot = &g_sleep_queue;
+    while (*slot && (*slot)->sleep_until_ticks <= thread->sleep_until_ticks) slot = &(*slot)->next;
+    thread->next = *slot;
+    *slot = thread;
 
     spin_unlock_irqrestore(&g_sleep_lock, flags);
 }
@@ -49,16 +51,12 @@ void timer_check_sleepers(void) {
     uint64_t flags;
     spin_lock_irqsave(&g_sleep_lock, &flags);
 
-    thread_t **curr = &g_sleep_queue;
-    while (*curr) {
-        thread_t *t = *curr;
-        if (timer_get_ticks() >= t->sleep_until_ticks) {
-            *curr = t->next;
-            t->next = NULL;
-            thread_wake(t);
-        } else {
-            curr = &t->next;
-        }
+    uint64_t now = timer_get_ticks();
+    while (g_sleep_queue && g_sleep_queue->sleep_until_ticks <= now) {
+        thread_t *thread = g_sleep_queue;
+        g_sleep_queue = thread->next;
+        thread->next = NULL;
+        thread_wake(thread);
     }
 
     spin_unlock_irqrestore(&g_sleep_lock, flags);

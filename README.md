@@ -39,6 +39,14 @@ printf 'GET demo\n' | nc 127.0.0.1 9090
 
 The service acknowledges an append after the guest filesystem flushes it. Identical retries return success and conflicting values for the same ID return an error. `ledgerpull <ip> <id>` fetches and persists a peer record over guest TCP. Type **q** on the guest console to stop the foreground service. [Protocol and network limits](docs/spec/network-contract.md)
 
+## Explore the system
+
+The [architecture diagrams](docs/diagrams/INDEX.md) cover the boot,
+memory, scheduling, storage and network paths. The
+[source walkthroughs](docs/WALKTHROUGHS.md) trace six operations through
+the actual implementation. The [reproduction runbook](docs/REPRODUCE.md)
+maps each workload to its raw evidence.
+
 ## Verify
 
 | Command | Work exercised |

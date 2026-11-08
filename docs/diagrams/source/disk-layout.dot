@@ -1,0 +1,23 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Mounted filesystems and StrataFS layout"];
+    root [label="VFS mount selection"];
+    bin [label="/bin: read-only CPIO"];
+    tmp [label="/tmp: volatile sparse pages"];
+    disk [label="/: StrataFS over virtio-blk"];
+    sb [label="Block 1: superblock"];
+    maps [label="Blocks 2–3: allocation bitmaps"];
+    inode [label="Blocks 4–67: inode table"];
+    journal [label="Blocks 68–579: WAL"];
+    data [label="Blocks 580 onward: file, directory and indirect blocks"];
+
+    root -> bin [label="Longest mount prefix"];
+    root -> tmp [label="Longest mount prefix"];
+    root -> disk [label="Root volume"];
+    disk -> sb [label="Format identity"];
+    sb -> maps [label="Allocation"];
+    sb -> inode [label="Object identity"];
+    sb -> journal [label="Replay range"];
+    inode -> data [label="Block references"];
+    journal -> data [label="Home targets"];
+}

@@ -1,0 +1,22 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Privilege entry and nested interrupt stacks"];
+    user [label="Ring 3"];
+    sys [label="SYSCALL assembly saves user RSP"];
+    traps [label="IDT gate with privilege transition"];
+    normal [label="Thread kernel stack\nPer-CPU TSS.rsp0"];
+    ist1 [label="Dedicated IST1"];
+    ist2 [label="Dedicated IST2"];
+    ret [label="SYSRETQ or IRETQ"];
+
+    user -> sys [label="Native ABI"];
+    sys -> normal [label="Switch from GS state"];
+    user -> traps [label="Hardware exception or diagnostic gate"];
+    traps -> normal [label="CPU selects RSP0"];
+    normal -> ist1 [label="Nested diagnostic interrupt"];
+    ist1 -> ist2 [label="Second nested diagnostic interrupt"];
+    ist2 -> ist1 [label="IRETQ"];
+    ist1 -> normal [label="IRETQ"];
+    normal -> ret [label="Return or terminate faulted process"];
+    ret -> user [label="Validated user context"];
+}

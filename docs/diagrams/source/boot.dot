@@ -1,0 +1,25 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Firmware to the first user instruction"];
+    efi [label="OVMF loads BOOTX64.EFI"];
+    elf [label="Validate kernel ELF and stage PT_LOAD"];
+    map [label="Snapshot firmware memory map"];
+    exit [label="ExitBootServices"];
+    entry [label="_start loads kernel entry state"];
+    handoff [label="boot_validate_handoff"];
+    smp [label="SMP, scheduler, VFS and devices"];
+    init [label="Embedded ELF enters ring 3"];
+    sh [label="PID 1 executes /bin/sh"];
+    reject [label="Diagnostic and halt"];
+
+    efi -> elf [label="EFI volume"];
+    elf -> map [label="Load kernel and initramfs"];
+    map -> exit [label="Current key"];
+    exit -> map [label="Stale key"];
+    exit -> entry [label="Firmware ends"];
+    entry -> handoff [label="Version and ownership"];
+    handoff -> smp [label="Validated"];
+    handoff -> reject [label="Invalid"];
+    smp -> init [label="process_create_init"];
+    init -> sh [label="fork + execve"];
+}

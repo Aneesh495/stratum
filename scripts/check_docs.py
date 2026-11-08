@@ -86,6 +86,13 @@ def main():
     except (OSError, ValueError) as error:
         all_errors.append(str(error))
 
+    diagram_root = Path("docs/diagrams")
+    if (diagram_root / "INDEX.md").is_file():
+        sources = {path.stem for path in (diagram_root / "source").glob("*.dot")}
+        exports = {path.stem for path in (diagram_root / "rendered").glob("*.svg")}
+        if len(sources) < 16 or sources != exports:
+            all_errors.append("expected 16 or more matched DOT sources and SVG exports")
+
     if all_errors:
         print(f"\n[FAIL] Found {len(all_errors)} documentation issues:")
         for err in all_errors:

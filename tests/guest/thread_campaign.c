@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <shared/errno.h>
 #include <user/strat_api.h>
 
@@ -337,7 +338,72 @@ static int entry_stacks(void) {
     return 0;
 }
 
+#define MIGRATION_CHILDREN 32
+#define MIGRATION_DEADLINES 128
+
+typedef struct {
+    uint32_t pid;
+    uint32_t moved;
+    uint32_t cpu_mask;
+} timer_record_t;
+
+static void deadline_worker(int report) {
+    timer_record_t result = { .pid = (uint32_t)getpid() };
+    for (unsigned i = 0; i < MIGRATION_DEADLINES; i++) {
+        int cpu_before = strat_getcpu();
+        uint32_t delay = 10 * (1 + (i % 4));
+        uint64_t start = uptime();
+        if (sleep_ms(delay)) exit(1);
+        uint64_t elapsed = uptime() - start;
+        int cpu_after = strat_getcpu();
+        if (cpu_before < 0 || cpu_before >= MAX_CPUS || cpu_after < 0 || cpu_after >= MAX_CPUS ||
+            elapsed < delay || elapsed > delay + 2000) exit(2);
+        if (cpu_before != cpu_after) result.moved++;
+        result.cpu_mask |= (1U << cpu_before) | (1U << cpu_after);
+    }
+    exit(write(report, &result, sizeof(result)) == sizeof(result) ? 0 : 3);
+}
+
+static int deadlines(void) {
+    int report[2];
+    if (pipe(report)) return 1;
+    int children[MIGRATION_CHILDREN];
+    for (unsigned i = 0; i < MIGRATION_CHILDREN; i++) {
+        children[i] = fork();
+        if (!children[i]) {
+            close(report[0]);
+            deadline_worker(report[1]);
+        }
+        if (children[i] < 0) return 2;
+    }
+    close(report[1]);
+    unsigned moved = 0, mask = 0;
+    bool observed[MIGRATION_CHILDREN] = {0};
+    for (unsigned i = 0; i < MIGRATION_CHILDREN; i++) {
+        timer_record_t result;
+        if (read_full(report[0], &result, sizeof(result))) return 3;
+        unsigned child = 0;
+        while (child < MIGRATION_CHILDREN && (uint32_t)children[child] != result.pid) child++;
+        if (child == MIGRATION_CHILDREN || observed[child] || result.moved > MIGRATION_DEADLINES) return 4;
+        observed[child] = true;
+        moved += result.moved;
+        mask |= result.cpu_mask;
+        u_printf("[DEADLINE] pid=%u migrations=%u cpu_mask=%x\n", result.pid, result.moved, result.cpu_mask);
+    }
+    close(report[0]);
+    for (unsigned i = 0; i < MIGRATION_CHILDREN; i++) {
+        int status;
+        if (waitpid(children[i], &status, 0) != children[i] || status) return 5;
+    }
+    strat_sysinfo_t info;
+    if (sysinfo(&info) || !moved || mask != (1U << info.online_cpus) - 1) return 6;
+    u_printf("[PASS] deadlines=%u migrations=%u CPU mask=%x\n",
+             MIGRATION_CHILDREN * MIGRATION_DEADLINES, moved, mask);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "deadlines")) return deadlines();
     if (argc == 2 && !strcmp(argv[1], "entry")) return entry_stacks();
     if (argc != 2) return 1;
     int result;

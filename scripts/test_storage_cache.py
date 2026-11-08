@@ -30,6 +30,11 @@ def main():
                         require(b"occurrence=2", result)
                     else:
                         require(b"[PASS] Block MSI-X woke", result)
+                if action == "cache":
+                    with running(command(BOOT_IMAGE, disk, cpus=4), logs / "cache-reboot.log") as guest:
+                        guest.expect(PROMPT)
+                        require(b"Two pinned dirty blocks recovered with exact bytes after reboot",
+                                shell(guest, "/bin/fs-campaign cache-reopen"))
                 with (logs / f"{action}-checker.log").open("w") as raw:
                     subprocess.run([str(checker), str(disk)], stdout=raw, stderr=subprocess.STDOUT,
                                    check=True, timeout=30)

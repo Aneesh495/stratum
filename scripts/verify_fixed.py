@@ -42,7 +42,10 @@ def verify(root, gates, result_path, document, require):
     for cpus in (4, 8):
         name = f"{cpus}cpu.log"
         if completed("A03"):
+            from test_deadlines import check_deadlines
+
             check_population(raw("threads", name), cpus)
+            check_deadlines(raw("deadlines", name), cpus)
             check("threads", name, b"futex cases=10000 mismatch=2500 wake=2500 timeout=2500 unmap=2500",
                   b"Every runnable worker completed within 60000 guest milliseconds")
         if completed("A04"):
@@ -77,6 +80,8 @@ def verify(root, gates, result_path, document, require):
         require(b"128006 mixed filesystem operations" in (root / "logs/storage-mixed.log").read_bytes(),
                 "mixed filesystem count mismatch")
         check("storage-cache", "cache.log", b"StrataFS cache hits=", b"Block MSI-X woke")
+        check("storage-cache", "cache-reboot.log", b"Two pinned dirty blocks recovered with exact bytes")
+        check("storage-cache", "cache-checker.log", b"[PASSED]")
         check("storage-cache", "alloc-fail.log", b"occurrence=2", b"allocation rollback and exact retry bytes")
         check("storage-cache", "flush-error.log", b"Backend flush failure surfaced as EIO")
         check("storage-cache", "flush-reboot.log", b"stable\r\n", b"accepted exact retry after remount")

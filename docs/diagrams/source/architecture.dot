@@ -1,0 +1,25 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Stratum subsystem boundaries"];
+    firmware [label="OVMF boot services"];
+    loader [label="Original UEFI loader\nboot/uefi/"];
+    kernel [label="CPU, memory and scheduler\nkernel/core/ + arch/ + mm/"];
+    abi [label="Native syscall and file ABI\nkernel/core/syscall.c"];
+    storage [label="VFS + StrataFS + WAL\nkernel/fs/"];
+    net [label="Ethernet, IP and sockets\nkernel/net/"];
+    devices [label="PCI transport and MSI-X\nkernel/drivers/"];
+    apps [label="init, sh, ledgerd\nuser/apps/"];
+    disk [label="Virtio block disk"];
+    wire [label="Virtio Ethernet link"];
+
+    firmware -> loader [label="PE/COFF"];
+    loader -> kernel [label="Validated handoff"];
+    kernel -> abi [label="Ring 3"];
+    apps -> abi [label="Syscalls"];
+    abi -> storage [label="Files"];
+    abi -> net [label="Sockets"];
+    storage -> devices [label="Flush and DMA"];
+    net -> devices [label="Frames"];
+    devices -> disk [label="Split queue"];
+    devices -> wire [label="Split queues"];
+}

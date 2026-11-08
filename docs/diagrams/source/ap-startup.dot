@@ -1,0 +1,22 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Application processor startup"];
+    bsp [label="BSP validates MADT CPU records"];
+    reserve [label="Allocate AP kernel stack and IST space"];
+    mb [label="Publish CR3, entry and stack in mailbox"];
+    ipi [label="Send INIT and SIPI"];
+    trampoline [label="Real-mode trampoline enables long mode"];
+    ap [label="smp_ap_entry loads GDT/TSS, IDT, GS"];
+    online [label="Publish AP online"];
+    sched [label="Per-CPU scheduler and LAPIC timer"];
+    failure [label="Bounded startup failure diagnostic"];
+
+    bsp -> reserve [label="Enabled AP"];
+    reserve -> mb [label="Owned stack"];
+    mb -> ipi [label="Target LAPIC ID"];
+    ipi -> trampoline [label="Low page"];
+    trampoline -> ap [label="Higher half"];
+    ap -> online [label="Release publication"];
+    online -> sched [label="Accept work"];
+    ipi -> failure [label="No handshake"];
+}

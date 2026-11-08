@@ -26,7 +26,7 @@ BINDINGS = {
     "K18": ("kernel/sync/futex.c", "threads cancellation"),
     "K19": ("kernel/sched/sched.c", "threads"),
     "K20": ("kernel/sched/sched.c kernel/core/process.c", "threads"),
-    "K21": ("kernel/sched/timer.c kernel/drivers/apic.c", "threads cancellation"),
+    "K21": ("kernel/sched/timer.c kernel/drivers/apic.c", "threads cancellation deadlines"),
     "K22": ("kernel/sched/sched.c kernel/net/net.c", "threads net-wrap soak"),
     "K23": ("kernel/core/user_elf.c kernel/core/exec.c", "exec production-fuzz"),
     "K24": ("kernel/core/process.c kernel/core/exec.c", "exec cancellation"),
@@ -66,19 +66,14 @@ BINDINGS = {
     "K58": ("scripts/build_image.py scripts/build_subsystems.mk", "regression"),
     "K59": ("scripts/fuzz_production.py kernel/fs/stratafs.c", "production-fuzz storage-cache wal-crash"),
     "K60": ("tests/guest/soak_campaign.c scripts/test_soak.py", "soak"),
-    "K61": ("scripts/test_guest_bench.py tests/guest/bench_campaign.c", "guest-bench"),
-    "K62": ("README.md docs/BUILD_STATUS.md docs/ACCEPTANCE_PLAN.md", "documentation"),
+    "K61": ("scripts/compare_benchmarks.py tests/guest/bench_campaign.c", "guest-bench benchmark-comparison"),
+    "K62": ("README.md docs/WALKTHROUGHS.md docs/REPRODUCE.md docs/diagrams/INDEX.md", "documentation"),
     "K63": ("scripts/run_acceptance.py scripts/full_acceptance.py", "image regression"),
     "K64": ("scripts/verify_evidence.py scripts/verify_acceptance.py", "regression"),
 }
 
 OPEN = {
-    "K21": "Deadline behavior while eligible tasks migrate",
-    "K37": "Combined dirty-buffer pin and eviction pressure",
-    "K61": "Equal-work comparisons against a frozen functional baseline",
-    "K62": "Completed claim-to-evidence links and release walkthrough",
-    "K63": "Complete fixed coverage on a published source and image",
-    "K64": "Full accepted bundle and all independent controls",
+    "K64": "Independent controls are recorded separately after the bundle is sealed",
 }
 
 

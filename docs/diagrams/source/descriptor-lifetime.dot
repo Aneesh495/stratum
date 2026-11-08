@@ -1,0 +1,22 @@
+digraph stratum {
+    rankdir=TB;
+    graph [labelloc=t, label="Process, descriptor and open-file lifetime"];
+    proc [label="Process owns descriptor table"];
+    slot [label="Slot number and generation"];
+    ref [label="Open-file reference"];
+    ipc [label="Pipe/channel/socket or vnode"];
+    copy [label="fork and dup2 take references"];
+    close [label="close or CLOEXEC removes slot"];
+    poll [label="Poll rechecks generation"];
+    last [label="Last reference releases object"];
+
+    proc -> slot [label="Open"];
+    slot -> ref [label="Owns one reference"];
+    ref -> ipc [label="Underlying object"];
+    copy -> ref [label="Increment"];
+    slot -> close [label="Unpublish"];
+    close -> poll [label="Notify replacement/EOF"];
+    close -> ref [label="Drop"];
+    ref -> last [label="Count zero"];
+    last -> ipc [label="Destroy or orphan reclaim"];
+}

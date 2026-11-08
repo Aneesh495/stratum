@@ -10,7 +10,7 @@ import struct
 import sys
 
 from acceptance_features import feature_rows, parse_register
-from acceptance_schema import GAPS, GATES, RUNS, SCHEMA
+from acceptance_schema import BENCHMARK_BASELINE, GAPS, GATES, RUNS, SCHEMA
 from evidence_format import file_hash
 
 
@@ -251,6 +251,22 @@ def verify(root, *, require_complete=True):
                     file_hash(pcap) == tcp["pcap_sha256"] and
                     verify_wire(pcap, 12, 131072) == tcp["wire_payload_sha256"],
                     "missing or changed TCP benchmark samples")
+
+    if workloads["benchmark-comparison"]["exit"] == 0:
+        from compare_benchmarks import OVERLAY, compare
+
+        path = result_path("benchmark-comparison", "comparison.json")
+        report = document(path)
+        require(report["baseline"]["source"] == BENCHMARK_BASELINE and
+                report["baseline"]["tree"] == git("rev-parse", f"{BENCHMARK_BASELINE}^{{tree}}").decode() and
+                report["baseline"]["overlay"] == {name: inputs["files"][name] for name in OVERLAY} and
+                report["candidate"]["source"] == commit and report["candidate"]["tree"] == tree and
+                report["candidate"]["overlay"] == {}, "benchmark comparison source mismatch")
+        require(report["candidate"]["boot_sha256"] == file_hash(result_path("image", "stratum-boot.img")) and
+                report["candidate"]["kernel_sha256"] == file_hash(result_path("image", "stratum.elf")) and
+                report["host"]["firmware_sha256"] == environment["firmware_sha256"] and
+                report["profiles"] == compare(path.parent, report, inputs["files"][OVERLAY[0]]),
+                "benchmark comparison observations or inputs disagree")
 
     statuses = [row["status"] for row in (*acceptance["gates"].values(), *features.values())]
     counts = {key: statuses.count(key) for key in ("passed", "failed", "blocked", "unverified", "skipped")}

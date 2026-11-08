@@ -17,7 +17,9 @@ from vm import BOOT_IMAGE, DATA_IMAGE, command, firmware, fresh_disk, running
 
 SAMPLES = {
     "timer": (30, 1000), "getpid": (30, 10000), "demand_zero": (30, 256),
-    "pipe_roundtrip": (30, 2000), "block_write": (10, 131072),
+    "pipe_roundtrip": (30, 2000), "context_switch": (30, 4000),
+    "wake_to_run": (30, 4), "allocator": (30, 256),
+    "smp_scaling": (10, 2000000), "block_write": (10, 131072),
     "fsync": (10, 1), "block_read": (10, 131072),
 }
 
@@ -32,7 +34,7 @@ def parse_samples(raw):
             raise RuntimeError(f"{name}: unexpected benchmark sample")
         rows.append(int(ticks))
     if any(len(samples[name]) != count for name, (count, _) in SAMPLES.items()):
-        raise RuntimeError("benchmark samples missing")
+        raise RuntimeError(f"benchmark samples missing: { {name: len(rows) for name, rows in samples.items()} }")
     require(b"[PASS] Guest benchmark samples verified", raw)
     return samples
 
