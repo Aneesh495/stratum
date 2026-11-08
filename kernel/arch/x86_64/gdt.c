@@ -94,6 +94,11 @@ void gdt_init(void) {
 
 #include <kernel/smp.h>
 
+const tss_t *gdt_current_tss(void) {
+    cpu_t *cpu = smp_get_current_cpu();
+    return cpu && !cpu->is_bsp ? &cpu->tss : &g_tss;
+}
+
 void gdt_set_kernel_stack(uint64_t rsp0) {
     cpu_t *cpu = smp_get_current_cpu();
     if (cpu) {

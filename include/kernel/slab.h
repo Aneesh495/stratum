@@ -6,6 +6,7 @@
 typedef struct kmem_cache kmem_cache_t;
 
 void slab_init(void);
+void slab_usage(uint64_t *pages, uint64_t *live_objects);
 
 void *kmalloc(size_t size);
 void *kzalloc(size_t size);

@@ -115,7 +115,7 @@ test-net-reject: image
 test-service: image
 	@$(PYTHON) scripts/test_ledger_load.py
 
-EXTRA_GUEST_TESTS = cancel block-timeout storage-cache tmpfs trace framebuffer tcp-reference tcp-recovery icmp supervision
+EXTRA_GUEST_TESTS = cancel block-timeout storage-cache tmpfs trace framebuffer tcp-reference tcp-recovery icmp supervision entry-stacks resource-limits
 .PHONY: $(addprefix test-,$(EXTRA_GUEST_TESTS))
 $(addprefix test-,$(EXTRA_GUEST_TESTS)): image
 	@$(PYTHON) scripts/test_$(subst -,_,$(patsubst test-%,%,$@)).py

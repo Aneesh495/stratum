@@ -51,7 +51,10 @@ model exercises 5,000 simulated crash states and 1,500 corrupted states.
 StrataFS caches up to 16 clean disk blocks with LRU eviction. Journal
 payloads own modified copies until commit. Home writes invalidate cached
 blocks under the filesystem mutex. A timed-out block request reports an
-error after reset acknowledgment. The caller owns retry policy.
+error after reset acknowledgment. The caller owns retry policy. A failed journal flush stops further
+mutations until remount. The cache campaign injects a real backend flush
+failure, verifies the old file after reboot, and checks that a retried
+commit survives the next boot. [QEMU block fault injection](https://qemu.readthedocs.io/en/v11.0.0/devel/testing/blkdebug.html)
 
 The volatile mount at `/tmp` supports directories, sparse regular files,
 rename and open-unlinked handles. It allows 128 objects, at most 16

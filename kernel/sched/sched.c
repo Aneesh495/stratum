@@ -403,6 +403,7 @@ void thread_sleep_ms(uint32_t ms) {
     thread_t *curr = g_runqueues[cpu_id].current_thread;
     if (curr) {
         timer_add_sleeper(curr, ms);
+        trace_emit(STRAT_TRACE_WAIT, curr->tid, THREAD_STATE_SLEEPING, curr->sleep_until_ticks, 0);
         sched_reschedule();
     }
     local_irq_restore(flags);
@@ -414,6 +415,7 @@ void thread_wake(thread_t *thread) {
     runqueue_t *rq = &g_runqueues[thread->assigned_cpu];
     uint64_t flags;
     spin_lock_irqsave(&rq->lock, &flags);
+    trace_emit(STRAT_TRACE_WAKE, thread->tid, thread->state, thread->assigned_cpu, 0);
     rq_enqueue(rq, thread);
 
     uint32_t target_cpu = thread->assigned_cpu;
@@ -440,6 +442,7 @@ static int wait_locked(wait_queue_t *wq, spinlock_t *condition, uint64_t flags, 
     }
     spin_lock(&wq->lock);
     curr->state = THREAD_STATE_BLOCKED;
+    trace_emit(STRAT_TRACE_WAIT, curr->tid, THREAD_STATE_BLOCKED, 0, 0);
     curr->wait_interruptible = interruptible;
     __atomic_store_n(&curr->waiting_on, wq, __ATOMIC_RELEASE);
     curr->wait_next = wq->head;

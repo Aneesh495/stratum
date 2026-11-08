@@ -57,7 +57,7 @@ def controls():
                                   lambda row: row["targets"]["elf"].update(executions=0))),
         ("inflated live population", "wrong live population",
          lambda r, m: change_file(r, m, artifact(r, "threads", "4cpu.log"),
-                                  lambda raw: raw + re.search(rb"^\[LIVE\].*\n", raw, re.M)[0])),
+                                  lambda raw: re.search(rb"^\[LIVE\].*\n", raw, re.M)[0] + raw)),
         ("shortened soak", "soak profile, count or duration mismatch",
          lambda r, m: change_json(r, m, artifact(r, "soak", "results.json"),
                                   lambda row: row.update(elapsed_seconds=3599))),

@@ -1,5 +1,6 @@
 #include <kernel/trace.h>
 #include <kernel/smp.h>
+#include <kernel/process.h>
 #include <kernel/kernel.h>
 #include <kernel/x86_64.h>
 #include <shared/errno.h>
@@ -33,6 +34,10 @@ void trace_emit(uint32_t event, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t 
         __atomic_store_n(&slot->record.tsc, rdtsc(), __ATOMIC_RELAXED);
         __atomic_store_n(&slot->record.cpu, cpu, __ATOMIC_RELAXED);
         __atomic_store_n(&slot->record.event, event, __ATOMIC_RELAXED);
+        const thread_t *thread = g_runqueues[cpu].current_thread;
+        uint32_t pid = thread && thread->process ? thread->process->pid : 0;
+        __atomic_store_n(&slot->record.pid, pid, __ATOMIC_RELAXED);
+        __atomic_store_n(&slot->record.tid, thread ? thread->tid : 0, __ATOMIC_RELAXED);
         __atomic_store_n(&slot->record.args[0], a1, __ATOMIC_RELAXED);
         __atomic_store_n(&slot->record.args[1], a2, __ATOMIC_RELAXED);
         __atomic_store_n(&slot->record.args[2], a3, __ATOMIC_RELAXED);
@@ -63,6 +68,8 @@ int trace_read(uint32_t cpu, uint64_t sequence, strat_trace_record_t *out) {
         .tsc = __atomic_load_n(&slot->record.tsc, __ATOMIC_RELAXED),
         .cpu = __atomic_load_n(&slot->record.cpu, __ATOMIC_RELAXED),
         .event = __atomic_load_n(&slot->record.event, __ATOMIC_RELAXED),
+        .pid = __atomic_load_n(&slot->record.pid, __ATOMIC_RELAXED),
+        .tid = __atomic_load_n(&slot->record.tid, __ATOMIC_RELAXED),
     };
     for (unsigned i = 0; i < 4; i++) record.args[i] = __atomic_load_n(&slot->record.args[i], __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_ACQUIRE);

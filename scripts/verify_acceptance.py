@@ -182,12 +182,13 @@ def verify(root, *, require_complete=True):
                 result["requested_seconds"] == 3600 and len(rounds) == result["rounds"] and
                 result["elapsed_seconds"] >= 3600, "soak profile, count or duration mismatch")
         baseline = result["baseline"]
-        observed = ("processes", "free_kib", "threads", "files", "packets", "journal_capacity", "journal_pending")
+        observed = ("processes", "threads", "files", "packets", "slab_objects", "journal_capacity", "journal_pending")
         elapsed, uptime, syscalls = 0, baseline["uptime_ms"], baseline["syscalls"]
         for index, row in enumerate(rounds, 1):
             require(row["round"] == index and row["elapsed_seconds"] > elapsed and
                     row["uptime_ms"] > uptime and row["syscalls"] > syscalls and
-                    all(row[name] == baseline[name] for name in observed),
+                    all(row[name] == baseline[name] for name in observed) and
+                    row["free_kib"] + row["slab_pages"] * 4 == baseline["free_kib"] + baseline["slab_pages"] * 4,
                     f"soak round {index}: stalled workload or resource mismatch")
             elapsed, uptime, syscalls = row["elapsed_seconds"], row["uptime_ms"], row["syscalls"]
         require(elapsed >= 3600 and baseline["packets"] == baseline["journal_pending"] == 0 and
@@ -215,6 +216,12 @@ def verify(root, *, require_complete=True):
                     f"{name}: fuzz log or seed digest mismatch")
             executions += row["executions"]
         require(executions == report["total_executions"] and executions >= 2000000, "fuzz execution total mismatch")
+
+    if workloads["trace"]["exit"] == 0:
+        trace = result_path("trace", "guest.log").read_bytes()
+        require(re.search(rb"trace wait and wake correlated pid=[1-9]\d* tid=[1-9]\d*", trace) and
+                re.search(rb"trace overflow cpu=0 retained=1024 lost=\d+ verified=\d+ newest=4095", trace),
+                "trace wait/wake or overflow evidence missing")
 
     if workloads["guest-bench"]["exit"] == 0:
         from test_guest_bench import parse_samples

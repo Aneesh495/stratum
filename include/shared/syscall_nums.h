@@ -73,6 +73,8 @@
 #define STRAT_PROCESS_SLOTS 64
 #define STRAT_PROCESS_NAME  32
 
+#define STRAT_TRACE_WAIT              8
+#define STRAT_TRACE_WAKE              9
 #define STRAT_TRACE_USER_BASE         100
 
 #define STRAT_CHANNEL_MAX_MESSAGE     512
@@ -171,6 +173,8 @@ typedef struct strat_trace_record {
     uint64_t tsc;
     uint32_t cpu;
     uint32_t event;
+    uint32_t pid;
+    uint32_t tid;
     uint64_t args[4];
 } strat_trace_record_t;
 
@@ -187,6 +191,8 @@ typedef struct strat_resources {
     uint64_t packet_buffers;
     uint32_t journal_capacity;
     uint32_t journal_pending;
+    uint64_t slab_pages;
+    uint64_t slab_objects;
 } strat_resources_t;
 
 typedef struct strat_queue_stats {

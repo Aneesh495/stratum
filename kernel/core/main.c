@@ -86,6 +86,7 @@ static _Noreturn void start_system(void) {
         file_console_mirror();
         keyboard_init();
     }
+    if (!strcmp(g_boot_handoff.cmdline, "irq=stacks\n")) idt_enable_stack_probe();
     sti();
 
     if (!strcmp(g_boot_handoff.cmdline, "boot-probe\n")) boot_probe_run();
@@ -201,6 +202,10 @@ void kmain(boot_handoff_t *handoff, uint64_t magic) {
     /* 9. Initialize Virtual Memory Manager (VMM) and switch CR3 */
     vmm_init(handoff);
 
+    if (!strcmp(handoff->cmdline, "memory=slab-pressure\n")) {
+        extern void slab_pressure_run(void);
+        slab_pressure_run();
+    }
     if (strcmp(handoff->cmdline, "fault=ud2\n") == 0) {
         __asm__ volatile("ud2");
     }

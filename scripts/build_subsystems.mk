@@ -71,6 +71,7 @@ KERNEL_CSRCS := kernel/core/string.c \
                 tests/guest/block_errors.c \
     tests/guest/block_wrap.c \
                 tests/guest/tlb.c \
+                tests/guest/slab_pressure.c \
                 tests/guest/stress.c
 
 KERNEL_ASMSRCS := kernel/arch/x86_64/entry.S \

@@ -46,5 +46,6 @@ struct cpu;
 void gdt_init(void);
 void gdt_init_ap(struct cpu *cpu);
 void gdt_set_kernel_stack(uint64_t rsp0);
+const tss_t *gdt_current_tss(void);
 
 #endif /* STRATUM_KERNEL_GDT_H */

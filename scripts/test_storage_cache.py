@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check cold and cached data, eviction, write coherence and allocation rollback."""
 
+import errno
 from pathlib import Path
 import subprocess
 import tempfile
@@ -33,6 +34,31 @@ def main():
                     subprocess.run([str(checker), str(disk)], stdout=raw, stderr=subprocess.STDOUT,
                                    check=True, timeout=30)
                 require(b"1 reachable inodes", (logs / f"{action}-checker.log").read_bytes())
+        rules = logs / "flush-blkdebug.conf"
+        rules.write_text(f'[inject-error]\nevent = "flush_to_disk"\niotype = "flush"\n'
+                         f'errno = "{errno.EIO}"\nonce = "on"\n', encoding="ascii")
+        with fresh_disk() as disk:
+            base = command(BOOT_IMAGE, disk, cpus=4)
+            with running(base, logs / "flush-prepare.log") as guest:
+                guest.expect(PROMPT)
+                if shell(guest, "write /flush-proof stable"):
+                    raise RuntimeError("flush fixture write failed")
+            with running(command(BOOT_IMAGE, disk, cpus=4, block_debug=rules), logs / "flush-error.log") as guest:
+                guest.expect(PROMPT)
+                require(b"Backend flush failure surfaced as EIO and stopped further commits",
+                        shell(guest, "/bin/fs-campaign flush-retry"))
+            with running(base, logs / "flush-reboot.log") as guest:
+                guest.expect(PROMPT)
+                if shell(guest, "cat /flush-proof") != b"stable\r\n":
+                    raise RuntimeError("failed transaction changed the recovered file")
+                require(b"StrataFS accepted exact retry after remount", shell(guest, "/bin/fs-campaign flush-recovered"))
+            with running(base, logs / "flush-confirmed.log") as guest:
+                guest.expect(PROMPT)
+                if shell(guest, "cat /flush-proof") != b"stable\r\nagain\r\n":
+                    raise RuntimeError("retried transaction did not survive reboot")
+            with (logs / "flush-checker.log").open("w") as raw:
+                subprocess.run([str(checker), str(disk)], stdout=raw, stderr=subprocess.STDOUT,
+                               check=True, timeout=30)
     print("[PASS] StrataFS cache pressure, coherent writes, and recovery from a real allocation rollback")
 
 

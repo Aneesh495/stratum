@@ -31,6 +31,7 @@ def observe(guest):
         "total_kib": b"Total Memory", "free_kib": b"Free Memory", "syscalls": b"Syscalls",
         "threads": b"Live Threads", "files": b"File Objects", "packets": b"Packet Buffers",
         "journal_capacity": b"Journal Capacity", "journal_pending": b"Journal Pending",
+        "slab_pages": b"Slab Pages", "slab_objects": b"Slab Objects",
     }
     stats = {key: int(re.search(label + rb":\s+(\d+)", reply)[1]) for key, label in labels.items()}
     if stats["cpus"] != 8 or not 900000 <= stats["total_kib"] <= 1048576:
@@ -91,9 +92,11 @@ def run(seconds, logs):
                     rounds += 1
                     journal.write(json.dumps({"round": rounds, "elapsed_seconds": elapsed, **current}) + "\n")
                     journal.flush()
-                    resources = ("processes", "free_kib", "threads", "files", "packets",
+                    resources = ("processes", "threads", "files", "packets", "slab_objects",
                                  "journal_capacity", "journal_pending")
-                    if any(current[name] != baseline[name] for name in resources):
+                    if (any(current[name] != baseline[name] for name in resources) or
+                        current["free_kib"] + current["slab_pages"] * 4 !=
+                        baseline["free_kib"] + baseline["slab_pages"] * 4):
                         raise RuntimeError(f"resources changed after round {rounds}: {baseline} to {current}")
                     if current["uptime_ms"] <= last["uptime_ms"] or current["syscalls"] <= last["syscalls"]:
                         raise RuntimeError(f"guest counters stopped after round {rounds}")

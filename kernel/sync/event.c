@@ -1,3 +1,4 @@
+#include <kernel/trace.h>
 #include <kernel/event.h>
 #include <kernel/sched.h>
 #include <kernel/smp.h>
@@ -64,6 +65,7 @@ static int wait_event(const void *owner, uint64_t key, uint64_t deadline, uint64
         return -STRATUM_EINTR;
     }
     waiter.thread->state = THREAD_STATE_BLOCKED;
+    trace_emit(STRAT_TRACE_WAIT, waiter.thread->tid, THREAD_STATE_BLOCKED, deadline, 0);
     waiter.next = *link;
     *link = &waiter;
     spin_unlock(&lock);
