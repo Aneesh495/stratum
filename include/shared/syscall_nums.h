@@ -68,6 +68,10 @@
 #define SYS_trace_info      78
 #define SYS_trace_read      79
 #define SYS_tcp_recovery    80
+#define SYS_process_info    81
+
+#define STRAT_PROCESS_SLOTS 64
+#define STRAT_PROCESS_NAME  32
 
 #define STRAT_TRACE_USER_BASE         100
 
@@ -149,6 +153,13 @@ typedef struct strat_sysinfo {
     uint64_t free_memory_bytes;
     uint64_t total_syscalls;
 } strat_sysinfo_t;
+
+typedef struct strat_process_info {
+    uint32_t pid;
+    uint32_t ppid;
+    uint32_t exited;
+    char name[STRAT_PROCESS_NAME];
+} strat_process_info_t;
 
 typedef struct strat_trace_info {
     uint64_t first;

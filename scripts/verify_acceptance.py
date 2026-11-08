@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 import subprocess
 import struct
+import sys
 
 from acceptance_features import feature_rows, parse_register
 from acceptance_schema import GAPS, GATES, RUNS, SCHEMA
@@ -144,6 +145,16 @@ def verify(root, *, require_complete=True):
                      result_path("diagnostics", f"stress-{cpu}.log").read_bytes()
                      for cpu in (1, 2, 4, 8))
         require(demand * 12800 >= 50000, "demand fault count below threshold")
+
+    if workloads["diagnostics"]["exit"] == 0:
+        symbols = document(result_path("diagnostics", "faults-2-symbols.json"))
+        observed = json.loads(subprocess.check_output([
+            sys.executable, "tools/symbolize_panic.py", str(result_path("image", "stratum.elf")),
+            str(result_path("diagnostics", "faults-2.log")),
+        ], timeout=15))
+        require(symbols == observed and len(symbols["frames"]) == 1 and
+                symbols["frames"][0]["symbol"] == "kmain" and symbols["frames"][0]["opcode"] == "0f0b",
+                "panic address or symbol does not match the recorded ELF")
 
     if acceptance["gates"]["A09"]["status"] == "passed":
         result = document(result_path("service", "results.json"))

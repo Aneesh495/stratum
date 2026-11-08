@@ -188,7 +188,7 @@ build-initramfs: $(BUILD_DIR)/initramfs.cpio
 
 $(BUILD_DIR)/initramfs.cpio: $(BUILD_DIR)/user_init.elf $(BUILD_DIR)/user_tools.elf $(BUILD_DIR)/user_exec_campaign.elf $(BUILD_DIR)/user_thread_campaign.elf $(BUILD_DIR)/user_ipc_campaign.elf $(BUILD_DIR)/user_fs_campaign.elf $(BUILD_DIR)/user_net_campaign.elf $(BUILD_DIR)/user_soak_campaign.elf $(BUILD_DIR)/user_ledger_campaign.elf $(BUILD_DIR)/user_tcp_campaign.elf $(BUILD_DIR)/user_shared_campaign.elf $(BUILD_DIR)/user_cancel_campaign.elf $(BUILD_DIR)/user_trace_campaign.elf $(BUILD_DIR)/user_bench_campaign.elf scripts/build_cpio.py
 	@mkdir -p $(BUILD_DIR)
-	@$(PYTHON) scripts/build_cpio.py $< $@ true=$(BUILD_DIR)/user_tools.elf \
+	@$(PYTHON) scripts/build_cpio.py $< $@ sh=$(BUILD_DIR)/user_init.elf true=$(BUILD_DIR)/user_tools.elf \
 		upper=$(BUILD_DIR)/user_tools.elf cp=$(BUILD_DIR)/user_tools.elf sha256sum=$(BUILD_DIR)/user_tools.elf exec-campaign=$(BUILD_DIR)/user_exec_campaign.elf \
 		thread-campaign=$(BUILD_DIR)/user_thread_campaign.elf ipc-campaign=$(BUILD_DIR)/user_ipc_campaign.elf \
 		fs-campaign=$(BUILD_DIR)/user_fs_campaign.elf net-campaign=$(BUILD_DIR)/user_net_campaign.elf \

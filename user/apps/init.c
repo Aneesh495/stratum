@@ -1,10 +1,11 @@
 #include <stdbool.h>
 #include <user/strat_api.h>
 
+extern int strcmp(const char *, const char *);
 extern int sh_execute_cmd(const char *cmd_line);
 extern void u_printf(const char *fmt, ...);
 
-int main(void) {
+static int shell(void) {
     char line[128];
     size_t len = 0;
     bool discard = false;
@@ -45,5 +46,26 @@ int main(void) {
                 discard = true;
             }
         }
+    }
+}
+
+
+int main(int argc, const char *const *argv) {
+    if (argc > 0 && !strcmp(argv[0], "sh")) return shell();
+    static const char *const args[] = {"sh", NULL};
+    for (;;) {
+        int pid = fork();
+        if (!pid) {
+            int result = execve("/bin/sh", args, NULL);
+            u_printf("init: shell exec failed (%d)\n", result);
+            return 127;
+        }
+        int status = 0;
+        if (pid > 0 && waitpid(pid, &status, 0) == pid) {
+            u_printf("[INIT] Reaped shell pid=%d status=%d\n", pid, status);
+        } else {
+            u_printf("init: shell launch or wait failed\n");
+        }
+        sleep_ms(100);
     }
 }

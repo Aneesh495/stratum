@@ -10,8 +10,9 @@
 #include <kernel/vmm.h>
 #include <kernel/syscall.h>
 #include <kernel/user_elf.h>
+#include <shared/syscall_nums.h>
 
-#define PROCESS_MAX_COUNT 64
+#define PROCESS_MAX_COUNT STRAT_PROCESS_SLOTS
 #define PROCESS_ANON_REGIONS 16
 #define PROCESS_WORKERS 32
 
@@ -42,7 +43,7 @@ typedef struct {
 typedef struct process {
     uint32_t         pid;
     uint32_t         ppid;
-    char             name[32];
+    char             name[STRAT_PROCESS_NAME];
     process_state_t  state;
     pml4_t          *address_space;
     thread_t        *main_thread;
@@ -66,6 +67,8 @@ typedef struct process {
 void       process_init(void);
 process_t *process_get_current(void);
 uint32_t   process_active_count(void);
+int        process_info(uint64_t slot, strat_process_info_t *info);
+void       process_set_name(process_t *process, const char *name);
 process_t *process_find(uint32_t pid);
 process_t *process_create_init(user_program_t *prog);
 int        process_exec(const char *path, const char *const *argv, const char *const *envp);

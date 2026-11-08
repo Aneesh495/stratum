@@ -295,6 +295,10 @@ static inline int strat_getcpu(void) {
     return (int)syscall0(SYS_getcpu);
 }
 
+static inline int strat_process_info(unsigned slot, strat_process_info_t *info) {
+    return (int)syscall2(SYS_process_info, slot, (uintptr_t)info);
+}
+
 static inline uint64_t strat_tcp_recovery(void) {
     return (uint64_t)syscall0(SYS_tcp_recovery);
 }

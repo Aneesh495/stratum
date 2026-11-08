@@ -23,7 +23,11 @@ zero at end of directory, or a negative error. A failed user copy leaves
 the directory cursor unchanged.
 
 The kernel starts the embedded native init binary and mounts the boot
-archive read-only at `/bin`. The shell looks up bare executable names in
+archive read-only at `/bin`. Init runs as PID 1 and supervises a native
+shell child. A normal shell exit causes init to reap and restart it on
+the same boot. The shell's `ps` built-in enumerates process slots. Each
+record is copied under the process table lock, and the listing can
+observe transitions between slots. The shell looks up bare executable names in
 `/bin`, accepts absolute paths, and supports quoting, pipes, input
 redirection, output truncation, and append redirection.
 
