@@ -11,8 +11,12 @@ from pathlib import Path
 
 
 def make_entry(name, data=b"", mode=0o100755, ino=1):
+    if "\x00" in name:
+        raise ValueError("archive entry names cannot contain NUL bytes")
     name_bytes = name.encode("utf-8") + b"\x00"
     mtime = int(os.environ.get("SOURCE_DATE_EPOCH", 1700000000))
+    if not 0 <= mtime <= 0xffffffff:
+        raise ValueError("SOURCE_DATE_EPOCH must fit an unsigned 32-bit CPIO timestamp")
     hdr = f"070701{ino:08x}{mode:08x}{0:08x}{0:08x}{1:08x}{mtime:08x}{len(data):08x}{0:08x}{0:08x}{0:08x}{0:08x}{len(name_bytes):08x}{0:08x}".encode("ascii")
     entry = bytearray(hdr + name_bytes)
     while len(entry) % 4 != 0:
