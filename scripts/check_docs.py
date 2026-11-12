@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
 from acceptance_features import BINDINGS, parse_register
 from acceptance_schema import RUNS
@@ -44,7 +45,7 @@ def check_file(filepath):
     for text, link in links:
         if link.startswith("http://") or link.startswith("https://") or link.startswith("#") or link.startswith("mailto:"):
             continue
-        link_path = link.split("#")[0]
+        link_path = unquote(link.split("#")[0])
         if not link_path:
             continue
         target = os.path.normpath(os.path.join(base_dir, link_path))
