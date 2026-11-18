@@ -4,7 +4,25 @@ Stratum boots an x86-64 kernel through its own UEFI loader. In QEMU, the kernel 
 
 [Download Stratum v0.1.0](https://github.com/Aneesh495/stratum/releases/tag/v0.1.0) · [Hosted acceptance](https://github.com/Aneesh495/stratum/actions/runs/42530758442)
 
-## Run it
+## Boot the release
+
+You can try Stratum without compiling it. Install QEMU x86-64, x86-64 UEFI firmware, and Python 3.10 or newer. On Ubuntu 24.04, the relevant packages are `qemu-system-x86` and `ovmf`. On Apple Silicon, Homebrew's `qemu` includes the x86-64 firmware.
+
+Download `stratum-f0a3dc824a88.tar.gz` and `SHA256SUMS` from the release above into the same directory. Verify the archive with `sha256sum -c SHA256SUMS` on Linux or `shasum -a 256 -c SHA256SUMS` on macOS. Then unpack it and run the bundled launcher:
+
+```sh
+mkdir stratum-v0.1.0
+tar -xzf stratum-f0a3dc824a88.tar.gz -C stratum-v0.1.0
+cd stratum-v0.1.0
+python3 source/scripts/run_vm.py \
+  --boot-img artifacts/images/stratum-boot.img \
+  --data-template artifacts/images/stratum-data.img \
+  --data-img var/stratum-data.img
+```
+
+The launcher boots to `stratum>` in the terminal. It creates the writable data disk from the bundled template on the first run and reuses it on later launches. If firmware detection fails, set `OVMF=/path/to/firmware.fd` before running the command. Press **Ctrl+A**, then **X** to exit QEMU.
+
+## Build and run from source
 
 On Ubuntu 24.04:
 
